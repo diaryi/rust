@@ -8,10 +8,9 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-// compile-flags:-Znll -Zborrowck=mir
+// compile-flags:-Zborrowck=mir
 
 #![allow(warnings)]
-#![feature(dyn_trait)]
 
 use std::fmt::Debug;
 
@@ -20,8 +19,7 @@ where
     T: Debug,
 {
     x
-    //~^ WARNING not reporting region error due to -Znll
-    //~| the parameter type `T` may not live long enough
+    //~^ ERROR the parameter type `T` may not live long enough
 }
 
 fn correct_region<'a, T>(x: Box<T>) -> Box<Debug + 'a>
@@ -36,8 +34,7 @@ where
     T: 'b + Debug,
 {
     x
-    //~^ WARNING not reporting region error due to -Znll
-    //~| the parameter type `T` may not live long enough
+    //~^ ERROR the parameter type `T` may not live long enough
 }
 
 fn outlives_region<'a, 'b, T>(x: Box<T>) -> Box<Debug + 'a>

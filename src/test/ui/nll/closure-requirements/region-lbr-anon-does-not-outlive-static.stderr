@@ -1,14 +1,11 @@
-warning: not reporting region error due to -Znll
+error[E0621]: explicit lifetime required in the type of `x`
   --> $DIR/region-lbr-anon-does-not-outlive-static.rs:19:5
    |
-19 |     &*x
-   |     ^^^
-
-error: free region `ReFree(DefId(0/0:3 ~ region_lbr_anon_does_not_outlive_static[317d]::foo[0]), BrAnon(0))` does not outlive free region `ReStatic`
-  --> $DIR/region-lbr-anon-does-not-outlive-static.rs:19:5
-   |
-19 |     &*x
-   |     ^^^
+LL | fn foo(x: &u32) -> &'static u32 {
+   |           ---- help: add explicit lifetime `ReStatic` to the type of `x`: `&ReStatic u32`
+LL |     &*x
+   |     ^^^ lifetime `ReStatic` required
 
 error: aborting due to previous error
 
+For more information about this error, try `rustc --explain E0621`.

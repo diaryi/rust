@@ -68,6 +68,8 @@
 /// assert_eq!('a', *x);
 /// ```
 #[lang = "deref"]
+#[doc(alias = "*")]
+#[doc(alias = "&*")]
 #[stable(feature = "rust1", since = "1.0.0")]
 pub trait Deref {
     /// The resulting type after dereferencing.
@@ -75,19 +77,20 @@ pub trait Deref {
     type Target: ?Sized;
 
     /// Dereferences the value.
+    #[must_use]
     #[stable(feature = "rust1", since = "1.0.0")]
     fn deref(&self) -> &Self::Target;
 }
 
 #[stable(feature = "rust1", since = "1.0.0")]
-impl<'a, T: ?Sized> Deref for &'a T {
+impl<T: ?Sized> Deref for &T {
     type Target = T;
 
     fn deref(&self) -> &T { *self }
 }
 
 #[stable(feature = "rust1", since = "1.0.0")]
-impl<'a, T: ?Sized> Deref for &'a mut T {
+impl<T: ?Sized> Deref for &mut T {
     type Target = T;
 
     fn deref(&self) -> &T { *self }
@@ -162,6 +165,7 @@ impl<'a, T: ?Sized> Deref for &'a mut T {
 /// assert_eq!('b', *x);
 /// ```
 #[lang = "deref_mut"]
+#[doc(alias = "*")]
 #[stable(feature = "rust1", since = "1.0.0")]
 pub trait DerefMut: Deref {
     /// Mutably dereferences the value.
@@ -170,6 +174,6 @@ pub trait DerefMut: Deref {
 }
 
 #[stable(feature = "rust1", since = "1.0.0")]
-impl<'a, T: ?Sized> DerefMut for &'a mut T {
+impl<T: ?Sized> DerefMut for &mut T {
     fn deref_mut(&mut self) -> &mut T { *self }
 }

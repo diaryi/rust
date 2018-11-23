@@ -11,27 +11,30 @@
 // Type substitutions.
 
 use hir::def_id::DefId;
-use ty::{self, Slice, Region, Ty, TyCtxt};
+use infer::canonical::Canonical;
+use ty::{self, BoundVar, Lift, List, Ty, TyCtxt};
 use ty::fold::{TypeFoldable, TypeFolder, TypeVisitor};
 
 use serialize::{self, Encodable, Encoder, Decodable, Decoder};
 use syntax_pos::{Span, DUMMY_SP};
-use rustc_data_structures::accumulate_vec::AccumulateVec;
+use rustc_data_structures::indexed_vec::Idx;
+use smallvec::SmallVec;
 
-use core::nonzero::NonZero;
+use core::intrinsics;
+use std::cmp::Ordering;
 use std::fmt;
-use std::iter;
 use std::marker::PhantomData;
 use std::mem;
+use std::num::NonZeroUsize;
 
-/// An entity in the Rust typesystem, which can be one of
+/// An entity in the Rust type system, which can be one of
 /// several kinds (only types and lifetimes for now).
 /// To reduce memory usage, a `Kind` is a interned pointer,
 /// with the lowest 2 bits being reserved for a tag to
 /// indicate the type (`Ty` or `Region`) it points to.
 #[derive(Copy, Clone, PartialEq, Eq, Hash)]
 pub struct Kind<'tcx> {
-    ptr: NonZero<usize>,
+    ptr: NonZeroUsize,
     marker: PhantomData<(Ty<'tcx>, ty::Region<'tcx>)>
 }
 
@@ -39,227 +42,226 @@ const TAG_MASK: usize = 0b11;
 const TYPE_TAG: usize = 0b00;
 const REGION_TAG: usize = 0b01;
 
-impl<'tcx> From<Ty<'tcx>> for Kind<'tcx> {
-    fn from(ty: Ty<'tcx>) -> Kind<'tcx> {
-        // Ensure we can use the tag bits.
-        assert_eq!(mem::align_of_val(ty) & TAG_MASK, 0);
+#[derive(Debug, RustcEncodable, RustcDecodable, PartialEq, Eq, PartialOrd, Ord)]
+pub enum UnpackedKind<'tcx> {
+    Lifetime(ty::Region<'tcx>),
+    Type(Ty<'tcx>),
+}
 
-        let ptr = ty as *const _ as usize;
+impl<'tcx> UnpackedKind<'tcx> {
+    fn pack(self) -> Kind<'tcx> {
+        let (tag, ptr) = match self {
+            UnpackedKind::Lifetime(lt) => {
+                // Ensure we can use the tag bits.
+                assert_eq!(mem::align_of_val(lt) & TAG_MASK, 0);
+                (REGION_TAG, lt as *const _ as usize)
+            }
+            UnpackedKind::Type(ty) => {
+                // Ensure we can use the tag bits.
+                assert_eq!(mem::align_of_val(ty) & TAG_MASK, 0);
+                (TYPE_TAG, ty as *const _ as usize)
+            }
+        };
+
         Kind {
             ptr: unsafe {
-                NonZero::new_unchecked(ptr | TYPE_TAG)
+                NonZeroUsize::new_unchecked(ptr | tag)
             },
             marker: PhantomData
         }
+    }
+}
+
+impl<'tcx> Ord for Kind<'tcx> {
+    fn cmp(&self, other: &Kind<'_>) -> Ordering {
+        self.unpack().cmp(&other.unpack())
+    }
+}
+
+impl<'tcx> PartialOrd for Kind<'tcx> {
+    fn partial_cmp(&self, other: &Kind<'_>) -> Option<Ordering> {
+        Some(self.cmp(&other))
     }
 }
 
 impl<'tcx> From<ty::Region<'tcx>> for Kind<'tcx> {
     fn from(r: ty::Region<'tcx>) -> Kind<'tcx> {
-        // Ensure we can use the tag bits.
-        assert_eq!(mem::align_of_val(r) & TAG_MASK, 0);
+        UnpackedKind::Lifetime(r).pack()
+    }
+}
 
-        let ptr = r as *const _ as usize;
-        Kind {
-            ptr: unsafe {
-                NonZero::new_unchecked(ptr | REGION_TAG)
-            },
-            marker: PhantomData
-        }
+impl<'tcx> From<Ty<'tcx>> for Kind<'tcx> {
+    fn from(ty: Ty<'tcx>) -> Kind<'tcx> {
+        UnpackedKind::Type(ty).pack()
     }
 }
 
 impl<'tcx> Kind<'tcx> {
     #[inline]
-    unsafe fn downcast<T>(self, tag: usize) -> Option<&'tcx T> {
+    pub fn unpack(self) -> UnpackedKind<'tcx> {
         let ptr = self.ptr.get();
-        if ptr & TAG_MASK == tag {
-            Some(&*((ptr & !TAG_MASK) as *const _))
-        } else {
-            None
-        }
-    }
-
-    #[inline]
-    pub fn as_type(self) -> Option<Ty<'tcx>> {
         unsafe {
-            self.downcast(TYPE_TAG)
-        }
-    }
-
-    #[inline]
-    pub fn as_region(self) -> Option<ty::Region<'tcx>> {
-        unsafe {
-            self.downcast(REGION_TAG)
+            match ptr & TAG_MASK {
+                REGION_TAG => UnpackedKind::Lifetime(&*((ptr & !TAG_MASK) as *const _)),
+                TYPE_TAG => UnpackedKind::Type(&*((ptr & !TAG_MASK) as *const _)),
+                _ => intrinsics::unreachable()
+            }
         }
     }
 }
 
 impl<'tcx> fmt::Debug for Kind<'tcx> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        if let Some(ty) = self.as_type() {
-            write!(f, "{:?}", ty)
-        } else if let Some(r) = self.as_region() {
-            write!(f, "{:?}", r)
-        } else {
-            write!(f, "<unknown @ {:p}>", self.ptr.get() as *const ())
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.unpack() {
+            UnpackedKind::Lifetime(lt) => write!(f, "{:?}", lt),
+            UnpackedKind::Type(ty) => write!(f, "{:?}", ty),
         }
     }
 }
 
 impl<'tcx> fmt::Display for Kind<'tcx> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        if let Some(ty) = self.as_type() {
-            write!(f, "{}", ty)
-        } else if let Some(r) = self.as_region() {
-            write!(f, "{}", r)
-        } else {
-            // FIXME(RFC 2000): extend this if/else chain when we support const generic.
-            unimplemented!();
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.unpack() {
+            UnpackedKind::Lifetime(lt) => write!(f, "{}", lt),
+            UnpackedKind::Type(ty) => write!(f, "{}", ty),
+        }
+    }
+}
+
+impl<'a, 'tcx> Lift<'tcx> for Kind<'a> {
+    type Lifted = Kind<'tcx>;
+
+    fn lift_to_tcx<'cx, 'gcx>(&self, tcx: TyCtxt<'cx, 'gcx, 'tcx>) -> Option<Self::Lifted> {
+        match self.unpack() {
+            UnpackedKind::Lifetime(a) => a.lift_to_tcx(tcx).map(|a| a.into()),
+            UnpackedKind::Type(a) => a.lift_to_tcx(tcx).map(|a| a.into()),
         }
     }
 }
 
 impl<'tcx> TypeFoldable<'tcx> for Kind<'tcx> {
     fn super_fold_with<'gcx: 'tcx, F: TypeFolder<'gcx, 'tcx>>(&self, folder: &mut F) -> Self {
-        if let Some(ty) = self.as_type() {
-            Kind::from(ty.fold_with(folder))
-        } else if let Some(r) = self.as_region() {
-            Kind::from(r.fold_with(folder))
-        } else {
-            bug!()
+        match self.unpack() {
+            UnpackedKind::Lifetime(lt) => lt.fold_with(folder).into(),
+            UnpackedKind::Type(ty) => ty.fold_with(folder).into(),
         }
     }
 
     fn super_visit_with<V: TypeVisitor<'tcx>>(&self, visitor: &mut V) -> bool {
-        if let Some(ty) = self.as_type() {
-            ty.visit_with(visitor)
-        } else if let Some(r) = self.as_region() {
-            r.visit_with(visitor)
-        } else {
-            bug!()
+        match self.unpack() {
+            UnpackedKind::Lifetime(lt) => lt.visit_with(visitor),
+            UnpackedKind::Type(ty) => ty.visit_with(visitor),
         }
     }
 }
 
 impl<'tcx> Encodable for Kind<'tcx> {
     fn encode<E: Encoder>(&self, e: &mut E) -> Result<(), E::Error> {
-        e.emit_enum("Kind", |e| {
-            if let Some(ty) = self.as_type() {
-                e.emit_enum_variant("Ty", TYPE_TAG, 1, |e| {
-                    e.emit_enum_variant_arg(0, |e| ty.encode(e))
-                })
-            } else if let Some(r) = self.as_region() {
-                e.emit_enum_variant("Region", REGION_TAG, 1, |e| {
-                    e.emit_enum_variant_arg(0, |e| r.encode(e))
-                })
-            } else {
-                bug!()
-            }
-        })
+        self.unpack().encode(e)
     }
 }
 
 impl<'tcx> Decodable for Kind<'tcx> {
     fn decode<D: Decoder>(d: &mut D) -> Result<Kind<'tcx>, D::Error> {
-        d.read_enum("Kind", |d| {
-            d.read_enum_variant(&["Ty", "Region"], |d, tag| {
-                match tag {
-                    TYPE_TAG => Ty::decode(d).map(Kind::from),
-                    REGION_TAG => Region::decode(d).map(Kind::from),
-                    _ => Err(d.error("invalid Kind tag"))
-                }
-            })
-        })
+        Ok(UnpackedKind::decode(d)?.pack())
     }
 }
 
-/// A substitution mapping type/region parameters to new values.
-pub type Substs<'tcx> = Slice<Kind<'tcx>>;
+/// A substitution mapping generic parameters to new values.
+pub type Substs<'tcx> = List<Kind<'tcx>>;
 
 impl<'a, 'gcx, 'tcx> Substs<'tcx> {
-    /// Creates a Substs that maps each generic parameter to itself.
+    /// Creates a `Substs` that maps each generic parameter to itself.
     pub fn identity_for_item(tcx: TyCtxt<'a, 'gcx, 'tcx>, def_id: DefId)
                              -> &'tcx Substs<'tcx> {
-        Substs::for_item(tcx, def_id, |def, _| {
-            tcx.mk_region(ty::ReEarlyBound(def.to_early_bound_region_data()))
-        }, |def, _| tcx.mk_param_from_def(def))
+        Substs::for_item(tcx, def_id, |param, _| {
+            tcx.mk_param_from_def(param)
+        })
     }
 
-    /// Creates a Substs for generic parameter definitions,
-    /// by calling closures to obtain each region and type.
-    /// The closures get to observe the Substs as they're
+    /// Creates a `Substs` that maps each generic parameter to a higher-ranked
+    /// var bound at index `0`. For types, we use a `BoundVar` index equal to
+    /// the type parameter index. For regions, we use the `BoundRegion::BrNamed`
+    /// variant (which has a def-id).
+    pub fn bound_vars_for_item(
+        tcx: TyCtxt<'a, 'gcx, 'tcx>,
+        def_id: DefId
+    ) -> &'tcx Substs<'tcx> {
+        Substs::for_item(tcx, def_id, |param, _| {
+            match param.kind {
+                ty::GenericParamDefKind::Type { .. } => {
+                    tcx.mk_ty(ty::Bound(ty::BoundTy {
+                        index: ty::INNERMOST,
+                        var: ty::BoundVar::from(param.index),
+                        kind: ty::BoundTyKind::Param(param.name),
+                    })).into()
+                }
+
+                ty::GenericParamDefKind::Lifetime => {
+                    tcx.mk_region(ty::RegionKind::ReLateBound(
+                        ty::INNERMOST,
+                        ty::BoundRegion::BrNamed(param.def_id, param.name)
+                    )).into()
+                }
+            }
+        })
+    }
+
+    /// Creates a `Substs` for generic parameter definitions,
+    /// by calling closures to obtain each kind.
+    /// The closures get to observe the `Substs` as they're
     /// being built, which can be used to correctly
-    /// substitute defaults of type parameters.
-    pub fn for_item<FR, FT>(tcx: TyCtxt<'a, 'gcx, 'tcx>,
-                            def_id: DefId,
-                            mut mk_region: FR,
-                            mut mk_type: FT)
-                            -> &'tcx Substs<'tcx>
-    where FR: FnMut(&ty::RegionParameterDef, &[Kind<'tcx>]) -> ty::Region<'tcx>,
-          FT: FnMut(&ty::TypeParameterDef, &[Kind<'tcx>]) -> Ty<'tcx> {
+    /// substitute defaults of generic parameters.
+    pub fn for_item<F>(tcx: TyCtxt<'a, 'gcx, 'tcx>,
+                       def_id: DefId,
+                       mut mk_kind: F)
+                       -> &'tcx Substs<'tcx>
+    where F: FnMut(&ty::GenericParamDef, &[Kind<'tcx>]) -> Kind<'tcx>
+    {
         let defs = tcx.generics_of(def_id);
-        let mut substs = Vec::with_capacity(defs.count());
-        Substs::fill_item(&mut substs, tcx, defs, &mut mk_region, &mut mk_type);
+        let count = defs.count();
+        let mut substs = SmallVec::with_capacity(count);
+        Substs::fill_item(&mut substs, tcx, defs, &mut mk_kind);
         tcx.intern_substs(&substs)
     }
 
-    pub fn extend_to<FR, FT>(&self,
-                             tcx: TyCtxt<'a, 'gcx, 'tcx>,
-                             def_id: DefId,
-                             mut mk_region: FR,
-                             mut mk_type: FT)
-                             -> &'tcx Substs<'tcx>
-    where FR: FnMut(&ty::RegionParameterDef, &[Kind<'tcx>]) -> ty::Region<'tcx>,
-          FT: FnMut(&ty::TypeParameterDef, &[Kind<'tcx>]) -> Ty<'tcx>
+    pub fn extend_to<F>(&self,
+                        tcx: TyCtxt<'a, 'gcx, 'tcx>,
+                        def_id: DefId,
+                        mut mk_kind: F)
+                        -> &'tcx Substs<'tcx>
+    where F: FnMut(&ty::GenericParamDef, &[Kind<'tcx>]) -> Kind<'tcx>
     {
-        let defs = tcx.generics_of(def_id);
-        let mut result = Vec::with_capacity(defs.count());
-        result.extend(self[..].iter().cloned());
-        Substs::fill_single(&mut result, defs, &mut mk_region, &mut mk_type);
-        tcx.intern_substs(&result)
+        Substs::for_item(tcx, def_id, |param, substs| {
+            self.get(param.index as usize)
+                .cloned()
+                .unwrap_or_else(|| mk_kind(param, substs))
+        })
     }
 
-    pub fn fill_item<FR, FT>(substs: &mut Vec<Kind<'tcx>>,
-                             tcx: TyCtxt<'a, 'gcx, 'tcx>,
-                             defs: &ty::Generics,
-                             mk_region: &mut FR,
-                             mk_type: &mut FT)
-    where FR: FnMut(&ty::RegionParameterDef, &[Kind<'tcx>]) -> ty::Region<'tcx>,
-          FT: FnMut(&ty::TypeParameterDef, &[Kind<'tcx>]) -> Ty<'tcx> {
-
+    fn fill_item<F>(substs: &mut SmallVec<[Kind<'tcx>; 8]>,
+                    tcx: TyCtxt<'a, 'gcx, 'tcx>,
+                    defs: &ty::Generics,
+                    mk_kind: &mut F)
+    where F: FnMut(&ty::GenericParamDef, &[Kind<'tcx>]) -> Kind<'tcx>
+    {
         if let Some(def_id) = defs.parent {
             let parent_defs = tcx.generics_of(def_id);
-            Substs::fill_item(substs, tcx, parent_defs, mk_region, mk_type);
+            Substs::fill_item(substs, tcx, parent_defs, mk_kind);
         }
-        Substs::fill_single(substs, defs, mk_region, mk_type)
+        Substs::fill_single(substs, defs, mk_kind)
     }
 
-    fn fill_single<FR, FT>(substs: &mut Vec<Kind<'tcx>>,
-                           defs: &ty::Generics,
-                           mk_region: &mut FR,
-                           mk_type: &mut FT)
-    where FR: FnMut(&ty::RegionParameterDef, &[Kind<'tcx>]) -> ty::Region<'tcx>,
-          FT: FnMut(&ty::TypeParameterDef, &[Kind<'tcx>]) -> Ty<'tcx> {
-        // Handle Self first, before all regions.
-        let mut types = defs.types.iter();
-        if defs.parent.is_none() && defs.has_self {
-            let def = types.next().unwrap();
-            let ty = mk_type(def, substs);
-            assert_eq!(def.index as usize, substs.len());
-            substs.push(Kind::from(ty));
-        }
-
-        for def in &defs.regions {
-            let region = mk_region(def, substs);
-            assert_eq!(def.index as usize, substs.len());
-            substs.push(Kind::from(region));
-        }
-
-        for def in types {
-            let ty = mk_type(def, substs);
-            assert_eq!(def.index as usize, substs.len());
-            substs.push(Kind::from(ty));
+    fn fill_single<F>(substs: &mut SmallVec<[Kind<'tcx>; 8]>,
+                      defs: &ty::Generics,
+                      mk_kind: &mut F)
+    where F: FnMut(&ty::GenericParamDef, &[Kind<'tcx>]) -> Kind<'tcx>
+    {
+        substs.reserve(defs.params.len());
+        for param in &defs.params {
+            let kind = mk_kind(param, substs);
+            assert_eq!(param.index as usize, substs.len());
+            substs.push(kind);
         }
     }
 
@@ -268,37 +270,48 @@ impl<'a, 'gcx, 'tcx> Substs<'tcx> {
     }
 
     #[inline]
-    pub fn types(&'a self) -> impl DoubleEndedIterator<Item=Ty<'tcx>> + 'a {
-        self.iter().filter_map(|k| k.as_type())
+    pub fn types(&'a self) -> impl DoubleEndedIterator<Item = Ty<'tcx>> + 'a {
+        self.iter().filter_map(|k| {
+            if let UnpackedKind::Type(ty) = k.unpack() {
+                Some(ty)
+            } else {
+                None
+            }
+        })
     }
 
     #[inline]
-    pub fn regions(&'a self) -> impl DoubleEndedIterator<Item=ty::Region<'tcx>> + 'a {
-        self.iter().filter_map(|k| k.as_region())
+    pub fn regions(&'a self) -> impl DoubleEndedIterator<Item = ty::Region<'tcx>> + 'a {
+        self.iter().filter_map(|k| {
+            if let UnpackedKind::Lifetime(lt) = k.unpack() {
+                Some(lt)
+            } else {
+                None
+            }
+        })
     }
 
     #[inline]
     pub fn type_at(&self, i: usize) -> Ty<'tcx> {
-        self[i].as_type().unwrap_or_else(|| {
+        if let UnpackedKind::Type(ty) = self[i].unpack() {
+            ty
+        } else {
             bug!("expected type for param #{} in {:?}", i, self);
-        })
+        }
     }
 
     #[inline]
     pub fn region_at(&self, i: usize) -> ty::Region<'tcx> {
-        self[i].as_region().unwrap_or_else(|| {
+        if let UnpackedKind::Lifetime(lt) = self[i].unpack() {
+            lt
+        } else {
             bug!("expected region for param #{} in {:?}", i, self);
-        })
+        }
     }
 
     #[inline]
-    pub fn type_for_def(&self, ty_param_def: &ty::TypeParameterDef) -> Ty<'tcx> {
-        self.type_at(ty_param_def.index as usize)
-    }
-
-    #[inline]
-    pub fn region_for_def(&self, def: &ty::RegionParameterDef) -> ty::Region<'tcx> {
-        self.region_at(def.index as usize)
+    pub fn type_for_def(&self, def: &ty::GenericParamDef) -> Kind<'tcx> {
+        self.type_at(def.index as usize).into()
     }
 
     /// Transform from substitutions for a child of `source_ancestor`
@@ -311,7 +324,7 @@ impl<'a, 'gcx, 'tcx> Substs<'tcx> {
                        target_substs: &Substs<'tcx>)
                        -> &'tcx Substs<'tcx> {
         let defs = tcx.generics_of(source_ancestor);
-        tcx.mk_substs(target_substs.iter().chain(&self[defs.own_count()..]).cloned())
+        tcx.mk_substs(target_substs.iter().chain(&self[defs.params.len()..]).cloned())
     }
 
     pub fn truncate_to(&self, tcx: TyCtxt<'a, 'gcx, 'tcx>, generics: &ty::Generics)
@@ -322,7 +335,7 @@ impl<'a, 'gcx, 'tcx> Substs<'tcx> {
 
 impl<'tcx> TypeFoldable<'tcx> for &'tcx Substs<'tcx> {
     fn super_fold_with<'gcx: 'tcx, F: TypeFolder<'gcx, 'tcx>>(&self, folder: &mut F) -> Self {
-        let params: AccumulateVec<[_; 8]> = self.iter().map(|k| k.fold_with(folder)).collect();
+        let params: SmallVec<[_; 8]> = self.iter().map(|k| k.fold_with(folder)).collect();
 
         // If folding doesn't change the substs, it's faster to avoid
         // calling `mk_substs` and instead reuse the existing substs.
@@ -347,9 +360,9 @@ impl<'tcx> serialize::UseSpecializedDecodable for &'tcx Substs<'tcx> {}
 // `foo`. Or use `foo.subst_spanned(tcx, substs, Some(span))` when
 // there is more information available (for better errors).
 
-pub trait Subst<'tcx> : Sized {
+pub trait Subst<'tcx>: Sized {
     fn subst<'a, 'gcx>(&self, tcx: TyCtxt<'a, 'gcx, 'tcx>,
-                      substs: &[Kind<'tcx>]) -> Self {
+                       substs: &[Kind<'tcx>]) -> Self {
         self.subst_spanned(tcx, substs, None)
     }
 
@@ -370,7 +383,7 @@ impl<'tcx, T:TypeFoldable<'tcx>> Subst<'tcx> for T {
                                        span,
                                        root_ty: None,
                                        ty_stack_depth: 0,
-                                       region_binders_passed: 0 };
+                                       binders_passed: 0 };
         (*self).fold_with(&mut folder)
     }
 }
@@ -392,16 +405,16 @@ struct SubstFolder<'a, 'gcx: 'a+'tcx, 'tcx: 'a> {
     ty_stack_depth: usize,
 
     // Number of region binders we have passed through while doing the substitution
-    region_binders_passed: u32,
+    binders_passed: u32,
 }
 
 impl<'a, 'gcx, 'tcx> TypeFolder<'gcx, 'tcx> for SubstFolder<'a, 'gcx, 'tcx> {
     fn tcx<'b>(&'b self) -> TyCtxt<'b, 'gcx, 'tcx> { self.tcx }
 
     fn fold_binder<T: TypeFoldable<'tcx>>(&mut self, t: &ty::Binder<T>) -> ty::Binder<T> {
-        self.region_binders_passed += 1;
+        self.binders_passed += 1;
         let t = t.super_fold_with(self);
-        self.region_binders_passed -= 1;
+        self.binders_passed -= 1;
         t
     }
 
@@ -413,13 +426,12 @@ impl<'a, 'gcx, 'tcx> TypeFolder<'gcx, 'tcx> for SubstFolder<'a, 'gcx, 'tcx> {
         // the specialized routine `ty::replace_late_regions()`.
         match *r {
             ty::ReEarlyBound(data) => {
-                let r = self.substs.get(data.index as usize)
-                            .and_then(|k| k.as_region());
+                let r = self.substs.get(data.index as usize).map(|k| k.unpack());
                 match r {
-                    Some(r) => {
-                        self.shift_region_through_binders(r)
+                    Some(UnpackedKind::Lifetime(lt)) => {
+                        self.shift_region_through_binders(lt)
                     }
-                    None => {
+                    _ => {
                         let span = self.span.unwrap_or(DUMMY_SP);
                         span_bug!(
                             span,
@@ -449,7 +461,7 @@ impl<'a, 'gcx, 'tcx> TypeFolder<'gcx, 'tcx> for SubstFolder<'a, 'gcx, 'tcx> {
         self.ty_stack_depth += 1;
 
         let t1 = match t.sty {
-            ty::TyParam(p) => {
+            ty::Param(p) => {
                 self.ty_for_param(p, t)
             }
             _ => {
@@ -470,16 +482,15 @@ impl<'a, 'gcx, 'tcx> TypeFolder<'gcx, 'tcx> for SubstFolder<'a, 'gcx, 'tcx> {
 impl<'a, 'gcx, 'tcx> SubstFolder<'a, 'gcx, 'tcx> {
     fn ty_for_param(&self, p: ty::ParamTy, source_ty: Ty<'tcx>) -> Ty<'tcx> {
         // Look up the type in the substitutions. It really should be in there.
-        let opt_ty = self.substs.get(p.idx as usize)
-                         .and_then(|k| k.as_type());
+        let opt_ty = self.substs.get(p.idx as usize).map(|k| k.unpack());
         let ty = match opt_ty {
-            Some(t) => t,
-            None => {
+            Some(UnpackedKind::Type(ty)) => ty,
+            _ => {
                 let span = self.span.unwrap_or(DUMMY_SP);
                 span_bug!(
                     span,
                     "Type parameter `{:?}` ({:?}/{}) out of range \
-                         when substituting (root type={:?}) substs={:?}",
+                     when substituting (root type={:?}) substs={:?}",
                     p,
                     source_ty,
                     p.idx,
@@ -488,12 +499,12 @@ impl<'a, 'gcx, 'tcx> SubstFolder<'a, 'gcx, 'tcx> {
             }
         };
 
-        self.shift_regions_through_binders(ty)
+        self.shift_vars_through_binders(ty)
     }
 
     /// It is sometimes necessary to adjust the debruijn indices during substitution. This occurs
-    /// when we are substituting a type with escaping regions into a context where we have passed
-    /// through region binders. That's quite a mouthful. Let's see an example:
+    /// when we are substituting a type with escaping bound vars into a context where we have
+    /// passed through binders. That's quite a mouthful. Let's see an example:
     ///
     /// ```
     /// type Func<A> = fn(A);
@@ -533,75 +544,127 @@ impl<'a, 'gcx, 'tcx> SubstFolder<'a, 'gcx, 'tcx> {
     /// As indicated in the diagram, here the same type `&'a int` is substituted once, but in the
     /// first case we do not increase the Debruijn index and in the second case we do. The reason
     /// is that only in the second case have we passed through a fn binder.
-    fn shift_regions_through_binders(&self, ty: Ty<'tcx>) -> Ty<'tcx> {
-        debug!("shift_regions(ty={:?}, region_binders_passed={:?}, has_escaping_regions={:?})",
-               ty, self.region_binders_passed, ty.has_escaping_regions());
+    fn shift_vars_through_binders(&self, ty: Ty<'tcx>) -> Ty<'tcx> {
+        debug!("shift_vars(ty={:?}, binders_passed={:?}, has_escaping_bound_vars={:?})",
+               ty, self.binders_passed, ty.has_escaping_bound_vars());
 
-        if self.region_binders_passed == 0 || !ty.has_escaping_regions() {
+        if self.binders_passed == 0 || !ty.has_escaping_bound_vars() {
             return ty;
         }
 
-        let result = ty::fold::shift_regions(self.tcx(), self.region_binders_passed, &ty);
-        debug!("shift_regions: shifted result = {:?}", result);
+        let result = ty::fold::shift_vars(self.tcx(), &ty, self.binders_passed);
+        debug!("shift_vars: shifted result = {:?}", result);
 
         result
     }
 
     fn shift_region_through_binders(&self, region: ty::Region<'tcx>) -> ty::Region<'tcx> {
-        if self.region_binders_passed == 0 || !region.has_escaping_regions() {
+        if self.binders_passed == 0 || !region.has_escaping_bound_vars() {
             return region;
         }
-        self.tcx().mk_region(ty::fold::shift_region(*region, self.region_binders_passed))
+        ty::fold::shift_region(self.tcx, region, self.binders_passed)
     }
 }
 
-// Helper methods that modify substitutions.
+pub type CanonicalUserSubsts<'tcx> = Canonical<'tcx, UserSubsts<'tcx>>;
 
-impl<'a, 'gcx, 'tcx> ty::TraitRef<'tcx> {
-    pub fn from_method(tcx: TyCtxt<'a, 'gcx, 'tcx>,
-                       trait_id: DefId,
-                       substs: &Substs<'tcx>)
-                       -> ty::TraitRef<'tcx> {
-        let defs = tcx.generics_of(trait_id);
-
-        ty::TraitRef {
-            def_id: trait_id,
-            substs: tcx.intern_substs(&substs[..defs.own_count()])
+impl CanonicalUserSubsts<'tcx> {
+    /// True if this represents a substitution like
+    ///
+    /// ```text
+    /// [?0, ?1, ?2]
+    /// ```
+    ///
+    /// i.e., each thing is mapped to a canonical variable with the same index.
+    pub fn is_identity(&self) -> bool {
+        if self.value.user_self_ty.is_some() {
+            return false;
         }
-    }
-}
 
-impl<'a, 'gcx, 'tcx> ty::ExistentialTraitRef<'tcx> {
-    pub fn erase_self_ty(tcx: TyCtxt<'a, 'gcx, 'tcx>,
-                         trait_ref: ty::TraitRef<'tcx>)
-                         -> ty::ExistentialTraitRef<'tcx> {
-        // Assert there is a Self.
-        trait_ref.substs.type_at(0);
+        self.value.substs.iter().zip(BoundVar::new(0)..).all(|(kind, cvar)| {
+            match kind.unpack() {
+                UnpackedKind::Type(ty) => match ty.sty {
+                    ty::Bound(b) => {
+                        // We only allow a `ty::INNERMOST` index in substitutions.
+                        assert_eq!(b.index, ty::INNERMOST);
+                        cvar == b.var
+                    }
+                    _ => false,
+                },
 
-        ty::ExistentialTraitRef {
-            def_id: trait_ref.def_id,
-            substs: tcx.intern_substs(&trait_ref.substs[1..])
-        }
-    }
-}
-
-impl<'a, 'gcx, 'tcx> ty::PolyExistentialTraitRef<'tcx> {
-    /// Object types don't have a self-type specified. Therefore, when
-    /// we convert the principal trait-ref into a normal trait-ref,
-    /// you must give *some* self-type. A common choice is `mk_err()`
-    /// or some skolemized type.
-    pub fn with_self_ty(&self, tcx: TyCtxt<'a, 'gcx, 'tcx>,
-                        self_ty: Ty<'tcx>)
-                        -> ty::PolyTraitRef<'tcx>  {
-        // otherwise the escaping regions would be captured by the binder
-        assert!(!self_ty.has_escaping_regions());
-
-        self.map_bound(|trait_ref| {
-            ty::TraitRef {
-                def_id: trait_ref.def_id,
-                substs: tcx.mk_substs(
-                    iter::once(Kind::from(self_ty)).chain(trait_ref.substs.iter().cloned()))
+                UnpackedKind::Lifetime(r) => match r {
+                    ty::ReLateBound(index, br) => {
+                        // We only allow a `ty::INNERMOST` index in substitutions.
+                        assert_eq!(*index, ty::INNERMOST);
+                        cvar == br.assert_bound_var()
+                    }
+                    _ => false,
+                },
             }
         })
+    }
+}
+
+/// Stores the user-given substs to reach some fully qualified path
+/// (e.g., `<T>::Item` or `<T as Trait>::Item`).
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, RustcEncodable, RustcDecodable)]
+pub struct UserSubsts<'tcx> {
+    /// The substitutions for the item as given by the user.
+    pub substs: &'tcx Substs<'tcx>,
+
+    /// The self-type, in the case of a `<T>::Item` path (when applied
+    /// to an inherent impl). See `UserSelfTy` below.
+    pub user_self_ty: Option<UserSelfTy<'tcx>>,
+}
+
+BraceStructTypeFoldableImpl! {
+    impl<'tcx> TypeFoldable<'tcx> for UserSubsts<'tcx> {
+        substs,
+        user_self_ty,
+    }
+}
+
+BraceStructLiftImpl! {
+    impl<'a, 'tcx> Lift<'tcx> for UserSubsts<'a> {
+        type Lifted = UserSubsts<'tcx>;
+        substs,
+        user_self_ty,
+    }
+}
+
+/// Specifies the user-given self-type. In the case of a path that
+/// refers to a member in an inherent impl, this self-type is
+/// sometimes needed to constrain the type parameters on the impl. For
+/// example, in this code:
+///
+/// ```
+/// struct Foo<T> { }
+/// impl<A> Foo<A> { fn method() { } }
+/// ```
+///
+/// when you then have a path like `<Foo<&'static u32>>::method`,
+/// this struct would carry the def-id of the impl along with the
+/// self-type `Foo<u32>`. Then we can instantiate the parameters of
+/// the impl (with the substs from `UserSubsts`) and apply those to
+/// the self-type, giving `Foo<?A>`. Finally, we unify that with
+/// the self-type here, which contains `?A` to be `&'static u32`
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, RustcEncodable, RustcDecodable)]
+pub struct UserSelfTy<'tcx> {
+    pub impl_def_id: DefId,
+    pub self_ty: Ty<'tcx>,
+}
+
+BraceStructTypeFoldableImpl! {
+    impl<'tcx> TypeFoldable<'tcx> for UserSelfTy<'tcx> {
+        impl_def_id,
+        self_ty,
+    }
+}
+
+BraceStructLiftImpl! {
+    impl<'a, 'tcx> Lift<'tcx> for UserSelfTy<'a> {
+        type Lifted = UserSelfTy<'tcx>;
+        impl_def_id,
+        self_ty,
     }
 }

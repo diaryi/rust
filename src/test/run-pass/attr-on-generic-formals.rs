@@ -8,6 +8,8 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+#![allow(unused_attributes)]
+
 // This test ensures we can attach attributes to the formals in all
 // places where generic parameter lists occur, assuming appropriate
 // feature gates are enabled.
@@ -17,7 +19,7 @@
 // using `rustc_attrs` feature. There is a separate compile-fail/ test
 // ensuring that the attribute feature-gating works in this context.)
 
-#![feature(generic_param_attrs, rustc_attrs)]
+#![feature(rustc_attrs)]
 #![allow(dead_code)]
 
 struct StLt<#[rustc_lt_struct] 'a>(&'a u32);

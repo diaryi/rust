@@ -15,8 +15,6 @@ use rustc::ty::TyCtxt;
 use std::fmt::Debug;
 use std::io::{self, Write};
 
-use rustc_data_structures::indexed_vec::Idx;
-
 use super::pretty::dump_mir_def_ids;
 
 /// Write a graphviz DOT graph of a list of MIRs.
@@ -125,7 +123,7 @@ fn write_edges<W: Write>(source: BasicBlock, mir: &Mir, w: &mut W) -> io::Result
     let terminator = mir[source].terminator();
     let labels = terminator.kind.fmt_successor_labels();
 
-    for (&target, label) in terminator.successors().iter().zip(labels) {
+    for (&target, label) in terminator.successors().zip(labels) {
         writeln!(w, r#"    {} -> {} [label="{}"];"#, node(source), node(target), label)?;
     }
 

@@ -9,7 +9,7 @@
 // except according to those terms.
 
 // compile-flags: --error-format pretty-json -Zunstable-options
-// must-compile-successfully
+// compile-pass
 
 // The output for humans should just highlight the whole span without showing
 // the suggested replacement, but we also want to test that suggested
@@ -23,4 +23,13 @@ fn main() {
     // We want to suggest the properly-balanced expression `1 / (2 + 3)`, not
     // the malformed `1 / (2 + 3`
     let _a = (1 / (2 + 3));
+    f();
+}
+
+fn f() -> bool {
+    loop {
+        if (break { return true }) {
+        }
+    }
+    false
 }

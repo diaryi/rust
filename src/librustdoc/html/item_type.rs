@@ -11,6 +11,7 @@
 //! Item types.
 
 use std::fmt;
+use syntax::ext::base::MacroKind;
 use clean;
 
 /// Item type. Corresponds to `clean::ItemEnum` variants.
@@ -19,7 +20,12 @@ use clean;
 /// discriminants. JavaScript then is used to decode them into the original value.
 /// Consequently, every change to this type should be synchronized to
 /// the `itemTypes` mapping table in `static/main.js`.
-#[derive(Copy, PartialEq, Clone)]
+///
+/// In addition, code in `html::render` uses this enum to generate CSS classes, page prefixes, and
+/// module headings. If you are adding to this enum and want to ensure that the sidebar also prints
+/// a heading, edit the listing in `html/render.rs`, function `sidebar_module`. This uses an
+/// ordering based on a helper function inside `item_module`, in the same file.
+#[derive(Copy, PartialEq, Clone, Debug)]
 pub enum ItemType {
     Module          = 0,
     ExternCrate     = 1,
@@ -42,6 +48,10 @@ pub enum ItemType {
     AssociatedConst = 18,
     Union           = 19,
     ForeignType     = 20,
+    Keyword         = 21,
+    Existential     = 22,
+    ProcAttribute   = 23,
+    ProcDerive      = 24,
 }
 
 
@@ -50,6 +60,7 @@ pub enum NameSpace {
     Type,
     Value,
     Macro,
+    Keyword,
 }
 
 impl<'a> From<&'a clean::Item> for ItemType {
@@ -68,6 +79,7 @@ impl<'a> From<&'a clean::Item> for ItemType {
             clean::EnumItem(..)            => ItemType::Enum,
             clean::FunctionItem(..)        => ItemType::Function,
             clean::TypedefItem(..)         => ItemType::Typedef,
+            clean::ExistentialItem(..)     => ItemType::Existential,
             clean::StaticItem(..)          => ItemType::Static,
             clean::ConstantItem(..)        => ItemType::Constant,
             clean::TraitItem(..)           => ItemType::Trait,
@@ -82,8 +94,14 @@ impl<'a> From<&'a clean::Item> for ItemType {
             clean::PrimitiveItem(..)       => ItemType::Primitive,
             clean::AssociatedConstItem(..) => ItemType::AssociatedConst,
             clean::AssociatedTypeItem(..)  => ItemType::AssociatedType,
-            clean::AutoImplItem(..)        => ItemType::Impl,
             clean::ForeignTypeItem         => ItemType::ForeignType,
+            clean::KeywordItem(..)         => ItemType::Keyword,
+            clean::ProcMacroItem(ref mac)  => match mac.kind {
+                MacroKind::Bang            => ItemType::Macro,
+                MacroKind::Attr            => ItemType::ProcAttribute,
+                MacroKind::Derive          => ItemType::ProcDerive,
+                MacroKind::ProcMacroStub   => unreachable!(),
+            }
             clean::StrippedItem(..)        => unreachable!(),
         }
     }
@@ -103,6 +121,9 @@ impl From<clean::TypeKind> for ItemType {
             clean::TypeKind::Variant  => ItemType::Variant,
             clean::TypeKind::Typedef  => ItemType::Typedef,
             clean::TypeKind::Foreign  => ItemType::ForeignType,
+            clean::TypeKind::Macro    => ItemType::Macro,
+            clean::TypeKind::Attr     => ItemType::ProcAttribute,
+            clean::TypeKind::Derive   => ItemType::ProcDerive,
         }
     }
 }
@@ -131,6 +152,10 @@ impl ItemType {
             ItemType::Constant        => "constant",
             ItemType::AssociatedConst => "associatedconstant",
             ItemType::ForeignType     => "foreigntype",
+            ItemType::Keyword         => "keyword",
+            ItemType::Existential     => "existential",
+            ItemType::ProcAttribute   => "attr",
+            ItemType::ProcDerive      => "derive",
         }
     }
 
@@ -144,6 +169,7 @@ impl ItemType {
             ItemType::Trait |
             ItemType::Primitive |
             ItemType::AssociatedType |
+            ItemType::Existential |
             ItemType::ForeignType => NameSpace::Type,
 
             ItemType::ExternCrate |
@@ -158,7 +184,11 @@ impl ItemType {
             ItemType::Constant |
             ItemType::AssociatedConst => NameSpace::Value,
 
-            ItemType::Macro => NameSpace::Macro,
+            ItemType::Macro |
+            ItemType::ProcAttribute |
+            ItemType::ProcDerive => NameSpace::Macro,
+
+            ItemType::Keyword => NameSpace::Keyword,
         }
     }
 }
@@ -172,6 +202,7 @@ impl fmt::Display for ItemType {
 pub const NAMESPACE_TYPE: &'static str = "t";
 pub const NAMESPACE_VALUE: &'static str = "v";
 pub const NAMESPACE_MACRO: &'static str = "m";
+pub const NAMESPACE_KEYWORD: &'static str = "k";
 
 impl NameSpace {
     pub fn to_static_str(&self) -> &'static str {
@@ -179,6 +210,7 @@ impl NameSpace {
             NameSpace::Type => NAMESPACE_TYPE,
             NameSpace::Value => NAMESPACE_VALUE,
             NameSpace::Macro => NAMESPACE_MACRO,
+            NameSpace::Keyword => NAMESPACE_KEYWORD,
         }
     }
 }

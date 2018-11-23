@@ -113,6 +113,8 @@
 //!
 //! * *nothing* ⇒ [`Display`]
 //! * `?` ⇒ [`Debug`]
+//! * `x?` ⇒ [`Debug`] with lower-case hexadecimal integers
+//! * `X?` ⇒ [`Debug`] with upper-case hexadecimal integers
 //! * `o` ⇒ [`Octal`](trait.Octal.html)
 //! * `x` ⇒ [`LowerHex`](trait.LowerHex.html)
 //! * `X` ⇒ [`UpperHex`](trait.UpperHex.html)
@@ -150,7 +152,7 @@
 //! Additionally, the return value of this function is [`fmt::Result`] which is a
 //! type alias of [`Result`]`<(), `[`std::fmt::Error`]`>`. Formatting implementations
 //! should ensure that they propagate errors from the [`Formatter`][`Formatter`] (e.g., when
-//! calling [`write!`]) however, they should never return errors spuriously. That
+//! calling [`write!`]). However, they should never return errors spuriously. That
 //! is, a formatting implementation must and may only return an error if the
 //! passed-in [`Formatter`] returns an error. This is because, contrary to what
 //! the function signature might suggest, string formatting is an infallible
@@ -324,7 +326,7 @@
 //! sign := '+' | '-'
 //! width := count
 //! precision := count | '*'
-//! type := identifier | ''
+//! type := identifier | '?' | ''
 //! count := parameter | integer
 //! parameter := argument '$'
 //! ```
@@ -333,12 +335,12 @@
 //!
 //! Each argument being formatted can be transformed by a number of formatting
 //! parameters (corresponding to `format_spec` in the syntax above). These
-//! parameters affect the string representation of what's being formatted. This
-//! syntax draws heavily from Python's, so it may seem a bit familiar.
+//! parameters affect the string representation of what's being formatted.
 //!
 //! ## Fill/Alignment
 //!
-//! The fill character is provided normally in conjunction with the `width`
+//! The fill character is provided normally in conjunction with the
+//! [`width`](#width)
 //! parameter. This indicates that if the value being formatted is smaller than
 //! `width` some extra characters will be printed around it. The extra
 //! characters are specified by `fill`, and the alignment can be one of the
@@ -386,7 +388,8 @@
 //! padding specified by fill/alignment will be used to take up the required
 //! space.
 //!
-//! The default fill/alignment for non-numerics is a space and left-aligned. The
+//! The default [fill/alignment](#fillalignment) for non-numerics is a space and
+//! left-aligned. The
 //! defaults for numeric formatters is also a space but with right-alignment. If
 //! the `0` flag is specified for numerics, then the implicit fill character is
 //! `0`.
@@ -514,19 +517,21 @@ pub use core::fmt::rt;
 #[stable(feature = "rust1", since = "1.0.0")]
 pub use core::fmt::{Formatter, Result, Write};
 #[stable(feature = "rust1", since = "1.0.0")]
-pub use core::fmt::{Octal, Binary};
+pub use core::fmt::{Binary, Octal};
 #[stable(feature = "rust1", since = "1.0.0")]
-pub use core::fmt::{Display, Debug};
+pub use core::fmt::{Debug, Display};
 #[stable(feature = "rust1", since = "1.0.0")]
-pub use core::fmt::{LowerHex, UpperHex, Pointer};
+pub use core::fmt::{LowerHex, Pointer, UpperHex};
 #[stable(feature = "rust1", since = "1.0.0")]
 pub use core::fmt::{LowerExp, UpperExp};
 #[stable(feature = "rust1", since = "1.0.0")]
 pub use core::fmt::Error;
 #[stable(feature = "rust1", since = "1.0.0")]
-pub use core::fmt::{ArgumentV1, Arguments, write};
+pub use core::fmt::{write, ArgumentV1, Arguments};
 #[stable(feature = "rust1", since = "1.0.0")]
 pub use core::fmt::{DebugList, DebugMap, DebugSet, DebugStruct, DebugTuple};
+#[stable(feature = "fmt_flags_align", since = "1.28.0")]
+pub use core::fmt::{Alignment};
 
 use string;
 
@@ -561,7 +566,8 @@ use string;
 pub fn format(args: Arguments) -> string::String {
     let capacity = args.estimated_capacity();
     let mut output = string::String::with_capacity(capacity);
-    output.write_fmt(args)
-          .expect("a formatting trait implementation returned an error");
+    output
+        .write_fmt(args)
+        .expect("a formatting trait implementation returned an error");
     output
 }

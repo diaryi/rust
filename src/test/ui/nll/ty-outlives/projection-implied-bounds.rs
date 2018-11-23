@@ -8,7 +8,7 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-// compile-flags:-Znll -Zborrowck=mir -Zverbose
+// compile-flags:-Zborrowck=mir -Zverbose
 
 // Test that we can deduce when projections like `T::Item` outlive the
 // function body. Test that this does not imply that `T: 'a` holds.
@@ -43,8 +43,7 @@ where
 #[rustc_errors]
 fn generic2<T: Iterator>(value: T) {
     twice(value, |value_ref, item| invoke2(value_ref, item));
-    //~^ WARNING not reporting region error due to -Znll
-    //~| ERROR the parameter type `T` may not live long enough
+    //~^ ERROR the parameter type `T` may not live long enough
 }
 
 fn invoke2<'a, T, U>(a: &T, b: Cell<&'a Option<U>>)

@@ -51,11 +51,10 @@
 #![unstable(feature = "mpsc_select",
             reason = "This implementation, while likely sufficient, is unsafe and \
                       likely to be error prone. At some point in the future this \
-                      module will likely be replaced, and it is currently \
-                      unknown how much API breakage that will cause. The ability \
-                      to select over a number of channels will remain forever, \
-                      but no guarantees beyond this are being made",
+                      module will be removed.",
             issue = "27800")]
+#![rustc_deprecated(since = "1.32.0",
+                    reason = "channel selection will be removed in a future release")]
 
 
 use fmt;
@@ -93,7 +92,7 @@ pub struct Handle<'rx, T:Send+'rx> {
     next: *mut Handle<'static, ()>,
     prev: *mut Handle<'static, ()>,
     added: bool,
-    packet: &'rx (Packet+'rx),
+    packet: &'rx (dyn Packet+'rx),
 
     // due to our fun transmutes, we be sure to place this at the end. (nothing
     // previous relies on T)
@@ -518,6 +517,7 @@ mod tests {
         }
     }
 
+    #[allow(unused_must_use)]
     #[test]
     fn cloning() {
         let (tx1, rx1) = channel::<i32>();
@@ -540,6 +540,7 @@ mod tests {
         tx3.send(()).unwrap();
     }
 
+    #[allow(unused_must_use)]
     #[test]
     fn cloning2() {
         let (tx1, rx1) = channel::<i32>();

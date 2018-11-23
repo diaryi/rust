@@ -12,7 +12,7 @@ use std::panic;
 
 use errors::FatalError;
 
-use syntax::codemap::Span;
+use syntax::source_map::Span;
 use syntax::ext::base::*;
 use syntax::tokenstream::TokenStream;
 use syntax::ext::base;
@@ -51,7 +51,7 @@ impl base::AttrProcMacro for AttrProcMacro {
                 }
 
                 err.emit();
-                panic!(FatalError);
+                FatalError.raise();
             }
         }
     }
@@ -86,7 +86,7 @@ impl base::ProcMacro for BangProcMacro {
                 }
 
                 err.emit();
-                panic!(FatalError);
+                FatalError.raise();
             }
         }
     }

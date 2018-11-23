@@ -27,13 +27,12 @@ use path::{self, PathBuf};
 use ptr;
 use slice;
 use str;
-use sys_common::mutex::Mutex;
+use sys_common::mutex::{Mutex, MutexGuard};
 use sys::cvt;
 use sys::fd;
 use vec;
 
 const TMPBUF_SZ: usize = 128;
-static ENV_LOCK: Mutex = Mutex::new();
 
 
 extern {
@@ -47,6 +46,7 @@ extern {
                    target_os = "netbsd",
                    target_os = "openbsd",
                    target_os = "android",
+                   target_os = "hermit",
                    target_env = "newlib"),
                link_name = "__errno")]
     #[cfg_attr(target_os = "solaris", link_name = "___errno")]
@@ -376,7 +376,7 @@ pub fn current_exe() -> io::Result<PathBuf> {
     }
 }
 
-#[cfg(any(target_os = "fuchsia", target_os = "l4re"))]
+#[cfg(any(target_os = "fuchsia", target_os = "l4re", target_os = "hermit"))]
 pub fn current_exe() -> io::Result<PathBuf> {
     use io::ErrorKind;
     Err(io::Error::new(ErrorKind::Other, "Not yet implemented!"))
@@ -405,30 +405,30 @@ pub unsafe fn environ() -> *mut *const *const c_char {
     &mut environ
 }
 
+pub unsafe fn env_lock() -> MutexGuard<'static> {
+    // We never call `ENV_LOCK.init()`, so it is UB to attempt to
+    // acquire this mutex reentrantly!
+    static ENV_LOCK: Mutex = Mutex::new();
+    ENV_LOCK.lock()
+}
+
 /// Returns a vector of (variable, value) byte-vector pairs for all the
 /// environment variables of the current process.
 pub fn env() -> Env {
     unsafe {
-        ENV_LOCK.lock();
+        let _guard = env_lock();
         let mut environ = *environ();
-        if environ == ptr::null() {
-            ENV_LOCK.unlock();
-            panic!("os::env() failure getting env string from OS: {}",
-                   io::Error::last_os_error());
-        }
         let mut result = Vec::new();
-        while *environ != ptr::null() {
+        while environ != ptr::null() && *environ != ptr::null() {
             if let Some(key_value) = parse(CStr::from_ptr(*environ).to_bytes()) {
                 result.push(key_value);
             }
             environ = environ.offset(1);
         }
-        let ret = Env {
+        return Env {
             iter: result.into_iter(),
             _dont_send_or_sync_me: PhantomData,
-        };
-        ENV_LOCK.unlock();
-        return ret
+        }
     }
 
     fn parse(input: &[u8]) -> Option<(OsString, OsString)> {
@@ -452,15 +452,14 @@ pub fn getenv(k: &OsStr) -> io::Result<Option<OsString>> {
     // always None as well
     let k = CString::new(k.as_bytes())?;
     unsafe {
-        ENV_LOCK.lock();
+        let _guard = env_lock();
         let s = libc::getenv(k.as_ptr()) as *const libc::c_char;
         let ret = if s.is_null() {
             None
         } else {
             Some(OsStringExt::from_vec(CStr::from_ptr(s).to_bytes().to_vec()))
         };
-        ENV_LOCK.unlock();
-        return Ok(ret)
+        Ok(ret)
     }
 }
 
@@ -469,10 +468,8 @@ pub fn setenv(k: &OsStr, v: &OsStr) -> io::Result<()> {
     let v = CString::new(v.as_bytes())?;
 
     unsafe {
-        ENV_LOCK.lock();
-        let ret = cvt(libc::setenv(k.as_ptr(), v.as_ptr(), 1)).map(|_| ());
-        ENV_LOCK.unlock();
-        return ret
+        let _guard = env_lock();
+        cvt(libc::setenv(k.as_ptr(), v.as_ptr(), 1)).map(|_| ())
     }
 }
 
@@ -480,10 +477,8 @@ pub fn unsetenv(n: &OsStr) -> io::Result<()> {
     let nbuf = CString::new(n.as_bytes())?;
 
     unsafe {
-        ENV_LOCK.lock();
-        let ret = cvt(libc::unsetenv(nbuf.as_ptr())).map(|_| ());
-        ENV_LOCK.unlock();
-        return ret
+        let _guard = env_lock();
+        cvt(libc::unsetenv(nbuf.as_ptr())).map(|_| ())
     }
 }
 
@@ -545,4 +540,63 @@ pub fn getpid() -> u32 {
 
 pub fn getppid() -> u32 {
     unsafe { libc::getppid() as u32 }
+}
+
+#[cfg(target_env = "gnu")]
+pub fn glibc_version() -> Option<(usize, usize)> {
+    if let Some(Ok(version_str)) = glibc_version_cstr().map(CStr::to_str) {
+        parse_glibc_version(version_str)
+    } else {
+        None
+    }
+}
+
+#[cfg(target_env = "gnu")]
+fn glibc_version_cstr() -> Option<&'static CStr> {
+    weak! {
+        fn gnu_get_libc_version() -> *const libc::c_char
+    }
+    if let Some(f) = gnu_get_libc_version.get() {
+        unsafe { Some(CStr::from_ptr(f())) }
+    } else {
+        None
+    }
+}
+
+// Returns Some((major, minor)) if the string is a valid "x.y" version,
+// ignoring any extra dot-separated parts. Otherwise return None.
+#[cfg(target_env = "gnu")]
+fn parse_glibc_version(version: &str) -> Option<(usize, usize)> {
+    let mut parsed_ints = version.split('.').map(str::parse::<usize>).fuse();
+    match (parsed_ints.next(), parsed_ints.next()) {
+        (Some(Ok(major)), Some(Ok(minor))) => Some((major, minor)),
+        _ => None
+    }
+}
+
+#[cfg(all(test, target_env = "gnu"))]
+mod test {
+    use super::*;
+
+    #[test]
+    fn test_glibc_version() {
+        // This mostly just tests that the weak linkage doesn't panic wildly...
+        glibc_version();
+    }
+
+    #[test]
+    fn test_parse_glibc_version() {
+        let cases = [
+            ("0.0", Some((0, 0))),
+            ("01.+2", Some((1, 2))),
+            ("3.4.5.six", Some((3, 4))),
+            ("1", None),
+            ("1.-2", None),
+            ("1.foo", None),
+            ("foo.1", None),
+        ];
+        for &(version_str, parsed) in cases.iter() {
+            assert_eq!(parsed, parse_glibc_version(version_str));
+        }
+    }
 }

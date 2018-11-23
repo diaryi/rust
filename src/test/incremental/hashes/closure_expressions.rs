@@ -16,7 +16,7 @@
 // and make sure that the hash has changed, then change nothing between rev2 and
 // rev3 and make sure that the hash has not changed.
 
-// must-compile-successfully
+// compile-pass
 // revisions: cfail1 cfail2 cfail3
 // compile-flags: -Z query-dep-graph -Zincremental-ignore-spans
 
@@ -64,7 +64,7 @@ pub fn change_parameter_pattern() {
 }
 
 #[cfg(not(cfail1))]
-#[rustc_clean(cfg="cfail2", except="HirBody, MirValidated, MirOptimized, TypeckTables")]
+#[rustc_clean(cfg="cfail2", except="HirBody, MirValidated, TypeckTables")]
 #[rustc_clean(cfg="cfail3")]
 pub fn change_parameter_pattern() {
     let _ = |&x: &u32| x;
@@ -95,7 +95,7 @@ pub fn add_type_ascription_to_parameter() {
 }
 
 #[cfg(not(cfail1))]
-#[rustc_clean(cfg="cfail2", except="HirBody")]
+#[rustc_clean(cfg="cfail2", except="HirBody, MirValidated, TypeckTables")]
 #[rustc_clean(cfg="cfail3")]
 pub fn add_type_ascription_to_parameter() {
     let closure = |x: u32| x + 1u32;

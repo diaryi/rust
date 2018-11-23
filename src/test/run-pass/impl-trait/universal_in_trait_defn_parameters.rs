@@ -8,7 +8,7 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-#![feature(universal_impl_trait)]
+// run-pass
 
 use std::fmt::Debug;
 

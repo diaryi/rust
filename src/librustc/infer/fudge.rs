@@ -123,7 +123,7 @@ impl<'a, 'gcx, 'tcx> TypeFolder<'gcx, 'tcx> for RegionFudger<'a, 'gcx, 'tcx> {
 
     fn fold_ty(&mut self, ty: Ty<'tcx>) -> Ty<'tcx> {
         match ty.sty {
-            ty::TyInfer(ty::InferTy::TyVar(vid)) => {
+            ty::Infer(ty::InferTy::TyVar(vid)) => {
                 match self.type_variables.get(&vid) {
                     None => {
                         // This variable was created before the
@@ -131,7 +131,9 @@ impl<'a, 'gcx, 'tcx> TypeFolder<'gcx, 'tcx> for RegionFudger<'a, 'gcx, 'tcx> {
                         // variables to their binding anyhow, we know
                         // that it is unbound, so we can just return
                         // it.
-                        debug_assert!(self.infcx.type_variables.borrow_mut().probe(vid).is_none());
+                        debug_assert!(self.infcx.type_variables.borrow_mut()
+                                      .probe(vid)
+                                      .is_unknown());
                         ty
                     }
 

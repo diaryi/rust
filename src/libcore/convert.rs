@@ -48,25 +48,65 @@
 
 #![stable(feature = "rust1", since = "1.0.0")]
 
-use fmt;
-
-/// A type used as the error type for implementations of fallible conversion
-/// traits in cases where conversions cannot actually fail.
+/// An identity function.
 ///
-/// Because `Infallible` has no variants, a value of this type can never exist.
-/// It is used only to satisfy trait signatures that expect an error type, and
-/// signals to both the compiler and the user that the error case is impossible.
-#[unstable(feature = "try_from", issue = "33417")]
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub enum Infallible {}
+/// Two things are important to note about this function:
+///
+/// - It is not always equivalent to a closure like `|x| x` since the
+///   closure may coerce `x` into a different type.
+///
+/// - It moves the input `x` passed to the function.
+///
+/// While it might seem strange to have a function that just returns back the
+/// input, there are some interesting uses.
+///
+/// # Examples
+///
+/// Using `identity` to do nothing among other interesting functions:
+///
+/// ```rust
+/// #![feature(convert_id)]
+/// use std::convert::identity;
+///
+/// fn manipulation(x: u32) -> u32 {
+///     // Let's assume that this function does something interesting.
+///     x + 1
+/// }
+///
+/// let _arr = &[identity, manipulation];
+/// ```
+///
+/// Using `identity` to get a function that changes nothing in a conditional:
+///
+/// ```rust
+/// #![feature(convert_id)]
+/// use std::convert::identity;
+///
+/// # let condition = true;
+///
+/// # fn manipulation(x: u32) -> u32 { x + 1 }
+///
+/// let do_stuff = if condition { manipulation } else { identity };
+///
+/// // do more interesting stuff..
+///
+/// let _results = do_stuff(42);
+/// ```
+///
+/// Using `identity` to keep the `Some` variants of an iterator of `Option<T>`:
+///
+/// ```rust
+/// #![feature(convert_id)]
+/// use std::convert::identity;
+///
+/// let iter = vec![Some(1), None, Some(3)].into_iter();
+/// let filtered = iter.filter_map(identity).collect::<Vec<_>>();
+/// assert_eq!(vec![1, 3], filtered);
+/// ```
+#[unstable(feature = "convert_id", issue = "53500")]
+#[inline]
+pub const fn identity<T>(x: T) -> T { x }
 
-#[unstable(feature = "try_from", issue = "33417")]
-impl fmt::Display for Infallible {
-    fn fmt(&self, _: &mut fmt::Formatter) -> fmt::Result {
-        match *self {
-        }
-    }
-}
 /// A cheap reference-to-reference conversion. Used to convert a value to a
 /// reference value within generic code.
 ///
@@ -82,9 +122,9 @@ impl fmt::Display for Infallible {
 ///
 /// The key difference between the two traits is the intention:
 ///
-/// - Use `AsRef` when goal is to simply convert into a reference
-/// - Use `Borrow` when goal is related to writing code that is agnostic to the
-///   type of borrow and if is reference or value
+/// - Use `AsRef` when the goal is to simply convert into a reference
+/// - Use `Borrow` when the goal is related to writing code that is agnostic to
+///   the type of borrow and whether it is a reference or value
 ///
 /// See [the book][book] for a more detailed comparison.
 ///
@@ -141,9 +181,9 @@ pub trait AsRef<T: ?Sized> {
 ///
 /// # Generic Implementations
 ///
-/// - `AsMut` auto-dereferences if the inner type is a reference or a mutable
-///   reference (e.g.: `foo.as_ref()` will work the same if `foo` has type
-///   `&mut Foo` or `&&mut Foo`)
+/// - `AsMut` auto-dereferences if the inner type is a mutable reference
+///   (e.g.: `foo.as_mut()` will work the same if `foo` has type `&mut Foo`
+///   or `&mut &mut Foo`)
 ///
 /// # Examples
 ///
@@ -366,7 +406,7 @@ pub trait TryFrom<T>: Sized {
 
 // As lifts over &
 #[stable(feature = "rust1", since = "1.0.0")]
-impl<'a, T: ?Sized, U: ?Sized> AsRef<U> for &'a T where T: AsRef<U>
+impl<T: ?Sized, U: ?Sized> AsRef<U> for &T where T: AsRef<U>
 {
     fn as_ref(&self) -> &U {
         <T as AsRef<U>>::as_ref(*self)
@@ -375,14 +415,14 @@ impl<'a, T: ?Sized, U: ?Sized> AsRef<U> for &'a T where T: AsRef<U>
 
 // As lifts over &mut
 #[stable(feature = "rust1", since = "1.0.0")]
-impl<'a, T: ?Sized, U: ?Sized> AsRef<U> for &'a mut T where T: AsRef<U>
+impl<T: ?Sized, U: ?Sized> AsRef<U> for &mut T where T: AsRef<U>
 {
     fn as_ref(&self) -> &U {
         <T as AsRef<U>>::as_ref(*self)
     }
 }
 
-// FIXME (#23442): replace the above impls for &/&mut with the following more general one:
+// FIXME (#45742): replace the above impls for &/&mut with the following more general one:
 // // As lifts over Deref
 // impl<D: ?Sized + Deref, U: ?Sized> AsRef<U> for D where D::Target: AsRef<U> {
 //     fn as_ref(&self) -> &U {
@@ -392,14 +432,14 @@ impl<'a, T: ?Sized, U: ?Sized> AsRef<U> for &'a mut T where T: AsRef<U>
 
 // AsMut lifts over &mut
 #[stable(feature = "rust1", since = "1.0.0")]
-impl<'a, T: ?Sized, U: ?Sized> AsMut<U> for &'a mut T where T: AsMut<U>
+impl<T: ?Sized, U: ?Sized> AsMut<U> for &mut T where T: AsMut<U>
 {
     fn as_mut(&mut self) -> &mut U {
         (*self).as_mut()
     }
 }
 
-// FIXME (#23442): replace the above impl for &mut with the following more general one:
+// FIXME (#45742): replace the above impl for &mut with the following more general one:
 // // AsMut lifts over DerefMut
 // impl<D: ?Sized + Deref, U: ?Sized> AsMut<U> for D where D::Target: AsMut<U> {
 //     fn as_mut(&mut self) -> &mut U {
@@ -438,7 +478,7 @@ impl<T, U> TryInto<U> for T where U: TryFrom<T>
 // with an uninhabited error type.
 #[unstable(feature = "try_from", issue = "33417")]
 impl<T, U> TryFrom<U> for T where T: From<U> {
-    type Error = Infallible;
+    type Error = !;
 
     fn try_from(value: U) -> Result<Self, Self::Error> {
         Ok(T::from(value))

@@ -59,6 +59,7 @@ pub trait ToOwned {
     /// let vv: Vec<i32> = v.to_owned();
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
+    #[must_use = "cloning is often expensive and is not expected to have side effects"]
     fn to_owned(&self) -> Self::Owned;
 
     /// Uses borrowed data to replace owned data, usually by cloning.
@@ -139,6 +140,41 @@ impl<T> ToOwned for T
 /// // No clone occurs because `input` is already owned.
 /// let mut input = Cow::from(vec![-1, 0, 1]);
 /// abs_all(&mut input);
+/// ```
+///
+/// Another example showing how to keep `Cow` in a struct:
+///
+/// ```
+/// use std::borrow::{Cow, ToOwned};
+///
+/// struct Items<'a, X: 'a> where [X]: ToOwned<Owned=Vec<X>> {
+///     values: Cow<'a, [X]>,
+/// }
+///
+/// impl<'a, X: Clone + 'a> Items<'a, X> where [X]: ToOwned<Owned=Vec<X>> {
+///     fn new(v: Cow<'a, [X]>) -> Self {
+///         Items { values: v }
+///     }
+/// }
+///
+/// // Creates a container from borrowed values of a slice
+/// let readonly = [1, 2];
+/// let borrowed = Items::new((&readonly[..]).into());
+/// match borrowed {
+///     Items { values: Cow::Borrowed(b) } => println!("borrowed {:?}", b),
+///     _ => panic!("expect borrowed value"),
+/// }
+///
+/// let mut clone_on_write = borrowed;
+/// // Mutates the data from slice into owned vec and pushes a new value on top
+/// clone_on_write.values.to_mut().push(3);
+/// println!("clone_on_write = {:?}", clone_on_write.values);
+///
+/// // The data was mutated. Let check it out.
+/// match clone_on_write {
+///     Items { values: Cow::Owned(_) } => println!("clone_on_write contains owned data"),
+///     _ => panic!("expect owned data"),
+/// }
 /// ```
 #[stable(feature = "rust1", since = "1.0.0")]
 pub enum Cow<'a, B: ?Sized + 'a>

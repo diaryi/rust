@@ -19,7 +19,7 @@ pub type Result<T> = result::Result<T, Error>;
 
 impl Error {
     pub fn new(errno: i32) -> Error {
-        Error { errno: errno }
+        Error { errno }
     }
 
     pub fn mux(result: Result<usize>) -> usize {
@@ -48,13 +48,13 @@ impl Error {
 }
 
 impl fmt::Debug for Error {
-    fn fmt(&self, f: &mut fmt::Formatter) -> result::Result<(), fmt::Error> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.write_str(self.text())
     }
 }
 
 impl fmt::Display for Error {
-    fn fmt(&self, f: &mut fmt::Formatter) -> result::Result<(), fmt::Error> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.write_str(self.text())
     }
 }

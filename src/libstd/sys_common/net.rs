@@ -166,27 +166,9 @@ pub fn lookup_host(host: &str) -> io::Result<LookupHost> {
     hints.ai_socktype = c::SOCK_STREAM;
     let mut res = ptr::null_mut();
     unsafe {
-        match cvt_gai(c::getaddrinfo(c_host.as_ptr(), ptr::null(), &hints, &mut res)) {
-            Ok(_) => {
-                Ok(LookupHost { original: res, cur: res })
-            },
-            #[cfg(unix)]
-            Err(e) => {
-                // If we're running glibc prior to version 2.26, the lookup
-                // failure could be caused by caching a stale /etc/resolv.conf.
-                // We need to call libc::res_init() to clear the cache. But we
-                // shouldn't call it in on any other platform, because other
-                // res_init implementations aren't thread-safe. See
-                // https://github.com/rust-lang/rust/issues/41570 and
-                // https://github.com/rust-lang/rust/issues/43592.
-                use sys::net::res_init_if_glibc_before_2_26;
-                let _ = res_init_if_glibc_before_2_26();
-                Err(e)
-            },
-            // the cfg is needed here to avoid an "unreachable pattern" warning
-            #[cfg(not(unix))]
-            Err(e) => Err(e),
-        }
+        cvt_gai(c::getaddrinfo(c_host.as_ptr(), ptr::null(), &hints, &mut res)).map(|_| {
+            LookupHost { original: res, cur: res }
+        })
     }
 }
 
@@ -640,7 +622,8 @@ mod tests {
             Ok(lh) => lh,
             Err(e) => panic!("couldn't resolve `localhost': {}", e)
         };
-        let _na = lh.map(|sa| *addrs.entry(sa).or_insert(0) += 1).count();
-        assert!(addrs.values().filter(|&&v| v > 1).count() == 0);
+        for sa in lh { *addrs.entry(sa).or_insert(0) += 1; };
+        assert_eq!(addrs.iter().filter(|&(_, &v)| v > 1).collect::<Vec<_>>(), vec![],
+                   "There should be no duplicate localhost entries");
     }
 }

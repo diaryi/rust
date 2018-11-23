@@ -8,6 +8,8 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+// run-pass
+
 // ignore-emscripten no threads support
 // compile-flags: --test
 
@@ -24,7 +26,7 @@ fn simple() {
         }
     };
 
-    match foo.resume() {
+    match unsafe { foo.resume() } {
         GeneratorState::Complete(()) => {}
         s => panic!("bad state: {:?}", s),
     }
@@ -40,7 +42,7 @@ fn return_capture() {
         a
     };
 
-    match foo.resume() {
+    match unsafe { foo.resume() } {
         GeneratorState::Complete(ref s) if *s == "foo" => {}
         s => panic!("bad state: {:?}", s),
     }
@@ -52,11 +54,11 @@ fn simple_yield() {
         yield;
     };
 
-    match foo.resume() {
+    match unsafe { foo.resume() } {
         GeneratorState::Yielded(()) => {}
         s => panic!("bad state: {:?}", s),
     }
-    match foo.resume() {
+    match unsafe { foo.resume() } {
         GeneratorState::Complete(()) => {}
         s => panic!("bad state: {:?}", s),
     }
@@ -69,11 +71,11 @@ fn yield_capture() {
         yield b;
     };
 
-    match foo.resume() {
+    match unsafe { foo.resume() } {
         GeneratorState::Yielded(ref s) if *s == "foo" => {}
         s => panic!("bad state: {:?}", s),
     }
-    match foo.resume() {
+    match unsafe { foo.resume() } {
         GeneratorState::Complete(()) => {}
         s => panic!("bad state: {:?}", s),
     }
@@ -86,11 +88,11 @@ fn simple_yield_value() {
         return String::from("foo")
     };
 
-    match foo.resume() {
+    match unsafe { foo.resume() } {
         GeneratorState::Yielded(ref s) if *s == "bar" => {}
         s => panic!("bad state: {:?}", s),
     }
-    match foo.resume() {
+    match unsafe { foo.resume() } {
         GeneratorState::Complete(ref s) if *s == "foo" => {}
         s => panic!("bad state: {:?}", s),
     }
@@ -104,11 +106,11 @@ fn return_after_yield() {
         return a
     };
 
-    match foo.resume() {
+    match unsafe { foo.resume() } {
         GeneratorState::Yielded(()) => {}
         s => panic!("bad state: {:?}", s),
     }
-    match foo.resume() {
+    match unsafe { foo.resume() } {
         GeneratorState::Complete(ref s) if *s == "foo" => {}
         s => panic!("bad state: {:?}", s),
     }
@@ -156,11 +158,11 @@ fn send_and_sync() {
 fn send_over_threads() {
     let mut foo = || { yield };
     thread::spawn(move || {
-        match foo.resume() {
+        match unsafe { foo.resume() } {
             GeneratorState::Yielded(()) => {}
             s => panic!("bad state: {:?}", s),
         }
-        match foo.resume() {
+        match unsafe { foo.resume() } {
             GeneratorState::Complete(()) => {}
             s => panic!("bad state: {:?}", s),
         }
@@ -169,11 +171,11 @@ fn send_over_threads() {
     let a = String::from("a");
     let mut foo = || { yield a };
     thread::spawn(move || {
-        match foo.resume() {
+        match unsafe { foo.resume() } {
             GeneratorState::Yielded(ref s) if *s == "a" => {}
             s => panic!("bad state: {:?}", s),
         }
-        match foo.resume() {
+        match unsafe { foo.resume() } {
             GeneratorState::Complete(()) => {}
             s => panic!("bad state: {:?}", s),
         }

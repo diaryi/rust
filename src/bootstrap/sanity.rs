@@ -21,9 +21,10 @@
 use std::collections::HashMap;
 use std::env;
 use std::ffi::{OsString, OsStr};
-use std::fs;
-use std::process::Command;
+use std::fs::{self, File};
+use std::io::Read;
 use std::path::PathBuf;
+use std::process::Command;
 
 use build_helper::output;
 
@@ -73,7 +74,7 @@ pub fn check(build: &mut Build) {
     // one is present as part of the PATH then that can lead to the system
     // being unable to identify the files properly. See
     // https://github.com/rust-lang/rust/issues/34959 for more details.
-    if cfg!(windows) && path.to_string_lossy().contains("\"") {
+    if cfg!(windows) && path.to_string_lossy().contains('\"') {
         panic!("PATH contains invalid character '\"'");
     }
 
@@ -139,19 +140,17 @@ pub fn check(build: &mut Build) {
             continue;
         }
 
-        cmd_finder.must_have(build.cc(*target));
-        if let Some(ar) = build.ar(*target) {
-            cmd_finder.must_have(ar);
+        if !build.config.dry_run {
+            cmd_finder.must_have(build.cc(*target));
+            if let Some(ar) = build.ar(*target) {
+                cmd_finder.must_have(ar);
+            }
         }
     }
 
     for host in &build.hosts {
-        cmd_finder.must_have(build.cxx(*host).unwrap());
-
-        // The msvc hosts don't use jemalloc, turn it off globally to
-        // avoid packaging the dummy liballoc_jemalloc on that platform.
-        if host.contains("msvc") {
-            build.config.use_jemalloc = false;
+        if !build.config.dry_run {
+            cmd_finder.must_have(build.cxx(*host).unwrap());
         }
     }
 
@@ -168,13 +167,26 @@ pub fn check(build: &mut Build) {
             panic!("the iOS target is only supported on macOS");
         }
 
+        if target.contains("-none-") {
+            if build.no_std(*target).is_none() {
+                let target = build.config.target_config.entry(target.clone())
+                    .or_default();
+
+                target.no_std = true;
+            }
+
+            if build.no_std(*target) == Some(false) {
+                panic!("All the *-none-* targets are no-std targets")
+            }
+        }
+
         // Make sure musl-root is valid
-        if target.contains("musl") && !target.contains("mips") {
+        if target.contains("musl") {
             // If this is a native target (host is also musl) and no musl-root is given,
             // fall back to the system toolchain in /usr before giving up
             if build.musl_root(*target).is_none() && build.config.build == *target {
                 let target = build.config.target_config.entry(target.clone())
-                                 .or_insert(Default::default());
+                    .or_default();
                 target.musl_root = Some("/usr".into());
             }
             match build.musl_root(*target) {
@@ -218,20 +230,17 @@ $ pacman -R cmake && pacman -S mingw-w64-x86_64-cmake
         }
     }
 
-    let run = |cmd: &mut Command| {
-        cmd.output().map(|output| {
-            String::from_utf8_lossy(&output.stdout)
-                   .lines().next().unwrap_or_else(|| {
-                       panic!("{:?} failed {:?}", cmd, output)
-                   }).to_string()
-        })
-    };
-    build.lldb_version = run(Command::new("lldb").arg("--version")).ok();
-    if build.lldb_version.is_some() {
-        build.lldb_python_dir = run(Command::new("lldb").arg("-P")).ok();
-    }
-
     if let Some(ref s) = build.config.ccache {
         cmd_finder.must_have(s);
+    }
+
+    if build.config.channel == "stable" {
+        let mut stage0 = String::new();
+        t!(t!(File::open(build.src.join("src/stage0.txt")))
+            .read_to_string(&mut stage0));
+        if stage0.contains("\ndev:") {
+            panic!("bootstrapping from a dev compiler in a stable release, but \
+                    should only be bootstrapping from a released compiler!");
+        }
     }
 }

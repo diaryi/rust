@@ -28,12 +28,22 @@
 use sync::Once;
 use sys;
 
+macro_rules! rtabort {
+    ($($t:tt)*) => (::sys_common::util::abort(format_args!($($t)*)))
+}
+
+macro_rules! rtassert {
+    ($e:expr) => (if !$e {
+        rtabort!(concat!("assertion failed: ", stringify!($e)));
+    })
+}
+
+pub mod alloc;
 pub mod at_exit_imp;
 #[cfg(feature = "backtrace")]
 pub mod backtrace;
 pub mod condvar;
 pub mod io;
-pub mod memchr;
 pub mod mutex;
 pub mod poison;
 pub mod remutex;
@@ -47,7 +57,7 @@ pub mod bytestring;
 pub mod process;
 
 cfg_if! {
-    if #[cfg(any(target_os = "redox", target_os = "l4re"))] {
+    if #[cfg(any(target_os = "cloudabi", target_os = "l4re", target_os = "redox"))] {
         pub use sys::net;
     } else if #[cfg(all(target_arch = "wasm32", not(target_os = "emscripten")))] {
         pub use sys::net;
@@ -100,10 +110,6 @@ pub trait FromInner<Inner> {
 /// to be run.
 pub fn at_exit<F: FnOnce() + Send + 'static>(f: F) -> Result<(), ()> {
     if at_exit_imp::push(Box::new(f)) {Ok(())} else {Err(())}
-}
-
-macro_rules! rtabort {
-    ($($t:tt)*) => (::sys_common::util::abort(format_args!($($t)*)))
 }
 
 /// One-time runtime cleanup.

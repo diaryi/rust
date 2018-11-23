@@ -14,7 +14,7 @@ use session::{early_error, config};
 
 #[derive(Clone, Debug)]
 pub struct SearchPaths {
-    paths: Vec<(PathKind, PathBuf)>,
+    crate paths: Vec<(PathKind, PathBuf)>,
 }
 
 pub struct Iter<'a> {
@@ -57,7 +57,7 @@ impl SearchPaths {
         self.paths.push((kind, PathBuf::from(path)));
     }
 
-    pub fn iter(&self, kind: PathKind) -> Iter {
+    pub fn iter(&self, kind: PathKind) -> Iter<'_> {
         Iter { kind: kind, iter: self.paths.iter() }
     }
 }
@@ -77,5 +77,12 @@ impl<'a> Iterator for Iter<'a> {
                 None => return None,
             }
         }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        // This iterator will never return more elements than the base iterator;
+        // but it can ignore all the remaining elements.
+        let (_, upper) = self.iter.size_hint();
+        (0, upper)
     }
 }

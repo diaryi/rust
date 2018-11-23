@@ -14,13 +14,18 @@ use dep_graph::DepNode;
 use ich::Fingerprint;
 use rustc_data_structures::indexed_vec::{IndexVec, Idx};
 
-newtype_index!(SerializedDepNodeIndex);
+newtype_index! {
+    pub struct SerializedDepNodeIndex { .. }
+}
 
 /// Data for use when recompiling the **current crate**.
-#[derive(Debug, RustcEncodable, RustcDecodable)]
+#[derive(Debug, RustcEncodable, RustcDecodable, Default)]
 pub struct SerializedDepGraph {
     /// The set of all DepNodes in the graph
-    pub nodes: IndexVec<SerializedDepNodeIndex, (DepNode, Fingerprint)>,
+    pub nodes: IndexVec<SerializedDepNodeIndex, DepNode>,
+    /// The set of all Fingerprints in the graph. Each Fingerprint corresponds to
+    /// the DepNode at the same index in the nodes vector.
+    pub fingerprints: IndexVec<SerializedDepNodeIndex, Fingerprint>,
     /// For each DepNode, stores the list of edges originating from that
     /// DepNode. Encoded as a [start, end) pair indexing into edge_list_data,
     /// which holds the actual DepNodeIndices of the target nodes.
@@ -31,15 +36,6 @@ pub struct SerializedDepGraph {
 }
 
 impl SerializedDepGraph {
-
-    pub fn new() -> SerializedDepGraph {
-        SerializedDepGraph {
-            nodes: IndexVec::new(),
-            edge_list_indices: IndexVec::new(),
-            edge_list_data: Vec::new(),
-        }
-    }
-
     #[inline]
     pub fn edge_targets_from(&self,
                              source: SerializedDepNodeIndex)

@@ -75,7 +75,12 @@ use self::Ordering::*;
 /// the same book if their ISBN matches, even if the formats differ:
 ///
 /// ```
-/// enum BookFormat { Paperback, Hardback, Ebook }
+/// enum BookFormat {
+///     Paperback,
+///     Hardback,
+///     Ebook,
+/// }
+///
 /// struct Book {
 ///     isbn: i32,
 ///     format: BookFormat,
@@ -95,6 +100,84 @@ use self::Ordering::*;
 /// assert!(b1 != b3);
 /// ```
 ///
+/// ## How can I compare two different types?
+///
+/// The type you can compare with is controlled by `PartialEq`'s type parameter.
+/// For example, let's tweak our previous code a bit:
+///
+/// ```
+/// enum BookFormat {
+///     Paperback,
+///     Hardback,
+///     Ebook,
+/// }
+///
+/// struct Book {
+///     isbn: i32,
+///     format: BookFormat,
+/// }
+///
+/// impl PartialEq<BookFormat> for Book {
+///     fn eq(&self, other: &BookFormat) -> bool {
+///         match (&self.format, other) {
+///            (BookFormat::Paperback, BookFormat::Paperback) => true,
+///            (BookFormat::Hardback,  BookFormat::Hardback)  => true,
+///            (BookFormat::Ebook,     BookFormat::Ebook)     => true,
+///            (_, _) => false,
+///         }
+///     }
+/// }
+///
+/// let b1 = Book { isbn: 3, format: BookFormat::Paperback };
+///
+/// assert!(b1 == BookFormat::Paperback);
+/// assert!(b1 != BookFormat::Ebook);
+/// ```
+///
+/// By changing `impl PartialEq for Book` to `impl PartialEq<BookFormat> for Book`,
+/// we've changed what type we can use on the right side of the `==` operator.
+/// This lets us use it in the `assert!` statements at the bottom.
+///
+/// You can also combine these implementations to let the `==` operator work with
+/// two different types:
+///
+/// ```
+/// enum BookFormat {
+///     Paperback,
+///     Hardback,
+///     Ebook,
+/// }
+///
+/// struct Book {
+///     isbn: i32,
+///     format: BookFormat,
+/// }
+///
+/// impl PartialEq<BookFormat> for Book {
+///     fn eq(&self, other: &BookFormat) -> bool {
+///         match (&self.format, other) {
+///            (&BookFormat::Paperback, &BookFormat::Paperback) => true,
+///            (&BookFormat::Hardback,  &BookFormat::Hardback)  => true,
+///            (&BookFormat::Ebook,     &BookFormat::Ebook)     => true,
+///            (_, _) => false,
+///         }
+///     }
+/// }
+///
+/// impl PartialEq for Book {
+///     fn eq(&self, other: &Book) -> bool {
+///         self.isbn == other.isbn
+///     }
+/// }
+///
+/// let b1 = Book { isbn: 3, format: BookFormat::Paperback };
+/// let b2 = Book { isbn: 3, format: BookFormat::Ebook };
+///
+/// assert!(b1 == BookFormat::Paperback);
+/// assert!(b1 != BookFormat::Ebook);
+/// assert!(b1 == b2);
+/// ```
+///
 /// # Examples
 ///
 /// ```
@@ -106,7 +189,12 @@ use self::Ordering::*;
 /// ```
 #[lang = "eq"]
 #[stable(feature = "rust1", since = "1.0.0")]
-#[rustc_on_unimplemented = "can't compare `{Self}` with `{Rhs}`"]
+#[doc(alias = "==")]
+#[doc(alias = "!=")]
+#[rustc_on_unimplemented(
+    message="can't compare `{Self}` with `{Rhs}`",
+    label="no implementation for `{Self} == {Rhs}`",
+)]
 pub trait PartialEq<Rhs: ?Sized = Self> {
     /// This method tests for `self` and `other` values to be equal, and is used
     /// by `==`.
@@ -160,6 +248,8 @@ pub trait PartialEq<Rhs: ?Sized = Self> {
 /// }
 /// impl Eq for Book {}
 /// ```
+#[doc(alias = "==")]
+#[doc(alias = "!=")]
 #[stable(feature = "rust1", since = "1.0.0")]
 pub trait Eq: PartialEq<Self> {
     // this method is used solely by #[deriving] to assert
@@ -343,7 +433,7 @@ impl Ordering {
 /// v.sort_by_key(|&num| (num > 3, Reverse(num)));
 /// assert_eq!(v, vec![3, 2, 1, 6, 5, 4]);
 /// ```
-#[derive(PartialEq, Eq, Debug)]
+#[derive(PartialEq, Eq, Debug, Copy, Clone, Default, Hash)]
 #[stable(feature = "reverse_cmp_key", since = "1.19.0")]
 pub struct Reverse<T>(#[stable(feature = "reverse_cmp_key", since = "1.19.0")] pub T);
 
@@ -427,6 +517,11 @@ impl<T: Ord> Ord for Reverse<T> {
 ///     }
 /// }
 /// ```
+#[lang = "ord"]
+#[doc(alias = "<")]
+#[doc(alias = ">")]
+#[doc(alias = "<=")]
+#[doc(alias = ">=")]
 #[stable(feature = "rust1", since = "1.0.0")]
 pub trait Ord: Eq + PartialOrd<Self> {
     /// This method returns an `Ordering` between `self` and `other`.
@@ -457,6 +552,7 @@ pub trait Ord: Eq + PartialOrd<Self> {
     /// assert_eq!(2, 2.max(2));
     /// ```
     #[stable(feature = "ord_max_min", since = "1.21.0")]
+    #[inline]
     fn max(self, other: Self) -> Self
     where Self: Sized {
         if other >= self { other } else { self }
@@ -473,6 +569,7 @@ pub trait Ord: Eq + PartialOrd<Self> {
     /// assert_eq!(2, 2.min(2));
     /// ```
     #[stable(feature = "ord_max_min", since = "1.21.0")]
+    #[inline]
     fn min(self, other: Self) -> Self
     where Self: Sized {
         if self <= other { self } else { other }
@@ -596,9 +693,16 @@ impl PartialOrd for Ordering {
 /// assert_eq!(x < y, true);
 /// assert_eq!(x.lt(&y), true);
 /// ```
-#[lang = "ord"]
+#[lang = "partial_ord"]
 #[stable(feature = "rust1", since = "1.0.0")]
-#[rustc_on_unimplemented = "can't compare `{Self}` with `{Rhs}`"]
+#[doc(alias = ">")]
+#[doc(alias = "<")]
+#[doc(alias = "<=")]
+#[doc(alias = ">=")]
+#[rustc_on_unimplemented(
+    message="can't compare `{Self}` with `{Rhs}`",
+    label="no implementation for `{Self} < {Rhs}` and `{Self} > {Rhs}`",
+)]
 pub trait PartialOrd<Rhs: ?Sized = Self>: PartialEq<Rhs> {
     /// This method returns an ordering between `self` and `other` values if one exists.
     ///
@@ -929,12 +1033,12 @@ mod impls {
         fn gt(&self, other: & &'b B) -> bool { PartialOrd::gt(*self, *other) }
     }
     #[stable(feature = "rust1", since = "1.0.0")]
-    impl<'a, A: ?Sized> Ord for &'a A where A: Ord {
+    impl<A: ?Sized> Ord for &A where A: Ord {
         #[inline]
-        fn cmp(&self, other: & &'a A) -> Ordering { Ord::cmp(*self, *other) }
+        fn cmp(&self, other: &Self) -> Ordering { Ord::cmp(*self, *other) }
     }
     #[stable(feature = "rust1", since = "1.0.0")]
-    impl<'a, A: ?Sized> Eq for &'a A where A: Eq {}
+    impl<A: ?Sized> Eq for &A where A: Eq {}
 
     // &mut pointers
 
@@ -961,12 +1065,12 @@ mod impls {
         fn gt(&self, other: &&'b mut B) -> bool { PartialOrd::gt(*self, *other) }
     }
     #[stable(feature = "rust1", since = "1.0.0")]
-    impl<'a, A: ?Sized> Ord for &'a mut A where A: Ord {
+    impl<A: ?Sized> Ord for &mut A where A: Ord {
         #[inline]
-        fn cmp(&self, other: &&'a mut A) -> Ordering { Ord::cmp(*self, *other) }
+        fn cmp(&self, other: &Self) -> Ordering { Ord::cmp(*self, *other) }
     }
     #[stable(feature = "rust1", since = "1.0.0")]
-    impl<'a, A: ?Sized> Eq for &'a mut A where A: Eq {}
+    impl<A: ?Sized> Eq for &mut A where A: Eq {}
 
     #[stable(feature = "rust1", since = "1.0.0")]
     impl<'a, 'b, A: ?Sized, B: ?Sized> PartialEq<&'b mut B> for &'a A where A: PartialEq<B> {

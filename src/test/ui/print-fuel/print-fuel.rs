@@ -11,8 +11,9 @@
 #![crate_name="foo"]
 #![allow(dead_code)]
 
-// compile-flags: -Z print-fuel=foo
-// must-compile-successfully
+// (#55495: The --error-format is to sidestep an issue in our test harness)
+// compile-flags: --error-format human -Z print-fuel=foo
+// compile-pass
 
 struct S1(u8, u16, u8);
 struct S2(u8, u16, u8);

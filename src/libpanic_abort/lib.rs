@@ -19,18 +19,19 @@
        html_favicon_url = "https://doc.rust-lang.org/favicon.ico",
        html_root_url = "https://doc.rust-lang.org/nightly/",
        issue_tracker_base_url = "https://github.com/rust-lang/rust/issues/")]
-#![deny(warnings)]
 #![panic_runtime]
 #![allow(unused_features)]
 
 #![feature(core_intrinsics)]
 #![feature(libc)]
+#![feature(nll)]
 #![feature(panic_runtime)]
 #![feature(staged_api)]
+#![feature(rustc_attrs)]
 
 // Rust's "try" function, but if we're aborting on panics we just call the
 // function as there's nothing else we need to do here.
-#[no_mangle]
+#[rustc_std_internal_symbol]
 pub unsafe extern fn __rust_maybe_catch_panic(f: fn(*mut u8),
                                               data: *mut u8,
                                               _data_ptr: *mut usize,
@@ -49,11 +50,11 @@ pub unsafe extern fn __rust_maybe_catch_panic(f: fn(*mut u8),
 // which would break compat with XP. For now just use `intrinsics::abort` which
 // will kill us with an illegal instruction, which will do a good enough job for
 // now hopefully.
-#[no_mangle]
-pub unsafe extern fn __rust_start_panic(_data: usize, _vtable: usize) -> u32 {
+#[rustc_std_internal_symbol]
+pub unsafe extern fn __rust_start_panic(_payload: usize) -> u32 {
     abort();
 
-    #[cfg(unix)]
+    #[cfg(any(unix, target_os = "cloudabi"))]
     unsafe fn abort() -> ! {
         extern crate libc;
         libc::abort();
@@ -95,9 +96,17 @@ pub unsafe extern fn __rust_start_panic(_data: usize, _vtable: usize) -> u32 {
 // runtime at all.
 pub mod personalities {
     #[no_mangle]
-    #[cfg(not(all(target_os = "windows",
-                  target_env = "gnu",
-                  target_arch = "x86_64")))]
+    #[cfg(not(any(
+        all(
+            target_arch = "wasm32",
+            not(target_os = "emscripten"),
+        ),
+        all(
+            target_os = "windows",
+            target_env = "gnu",
+            target_arch = "x86_64",
+        ),
+    )))]
     pub extern fn rust_eh_personality() {}
 
     // On x86_64-pc-windows-gnu we use our own personality function that needs

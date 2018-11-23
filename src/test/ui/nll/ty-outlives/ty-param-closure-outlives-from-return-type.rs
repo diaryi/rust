@@ -8,10 +8,9 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-// compile-flags:-Znll -Zborrowck=mir -Zverbose
+// compile-flags:-Zborrowck=mir -Zverbose
 
 #![allow(warnings)]
-#![feature(dyn_trait)]
 #![feature(rustc_attrs)]
 
 use std::fmt::Debug;
@@ -35,8 +34,7 @@ where
     // `'a` (and subsequently reports an error).
 
     with_signature(x, |y| y)
-    //~^ WARNING not reporting region error due to -Znll
-    //~| ERROR the parameter type `T` may not live long enough
+    //~^ ERROR the parameter type `T` may not live long enough
 }
 
 fn correct_region<'a, T>(x: Box<T>) -> Box<Debug + 'a>
@@ -51,8 +49,7 @@ where
     T: 'b + Debug,
 {
     x
-    //~^ WARNING not reporting region error due to -Znll
-    //~| ERROR the parameter type `T` may not live long enough
+    //~^ ERROR the parameter type `T` may not live long enough
 }
 
 fn outlives_region<'a, 'b, T>(x: Box<T>) -> Box<Debug + 'a>

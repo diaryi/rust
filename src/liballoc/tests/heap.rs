@@ -8,13 +8,9 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-use alloc_system::System;
-use std::heap::{Heap, Alloc, Layout};
+use std::alloc::{Global, Alloc, Layout, System};
 
 /// https://github.com/rust-lang/rust/issues/45955
-///
-/// Note that `#[global_allocator]` is not used,
-/// so `liballoc_jemalloc` is linked (on some platforms).
 #[test]
 fn alloc_system_overaligned_request() {
     check_overalign_requests(System)
@@ -22,7 +18,7 @@ fn alloc_system_overaligned_request() {
 
 #[test]
 fn std_heap_overaligned_request() {
-    check_overalign_requests(Heap)
+    check_overalign_requests(Global)
 }
 
 fn check_overalign_requests<T: Alloc>(mut allocator: T) {
@@ -34,7 +30,8 @@ fn check_overalign_requests<T: Alloc>(mut allocator: T) {
             allocator.alloc(Layout::from_size_align(size, align).unwrap()).unwrap()
         }).collect();
         for &ptr in &pointers {
-            assert_eq!((ptr as usize) % align, 0, "Got a pointer less aligned than requested")
+            assert_eq!((ptr.as_ptr() as usize) % align, 0,
+                       "Got a pointer less aligned than requested")
         }
 
         // Clean up

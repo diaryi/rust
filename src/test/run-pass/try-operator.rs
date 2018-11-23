@@ -8,6 +8,9 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+#![allow(dead_code)]
+// ignore-cloudabi no std::fs
+
 use std::fs::File;
 use std::io::{Read, self};
 use std::num::ParseIntError;

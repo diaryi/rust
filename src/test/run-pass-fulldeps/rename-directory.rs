@@ -8,22 +8,20 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+#![allow(unused_must_use)]
+#![allow(unused_imports)]
 // This test can't be a unit test in std,
 // because it needs TempDir, which is in extra
 
 // ignore-cross-compile
 
-#![feature(rustc_private)]
-
-extern crate tempdir;
-
+use std::env;
 use std::ffi::CString;
 use std::fs::{self, File};
-use tempdir::TempDir;
+use std::path::PathBuf;
 
 fn rename_directory() {
-    let tmpdir = TempDir::new("rename_directory").ok().expect("rename_directory failed");
-    let tmpdir = tmpdir.path();
+    let tmpdir = PathBuf::from(env::var_os("RUST_TEST_TMPDIR").unwrap());
     let old_path = tmpdir.join("foo/bar/baz");
     fs::create_dir_all(&old_path).unwrap();
     let test_file = &old_path.join("temp.txt");

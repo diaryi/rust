@@ -13,12 +13,9 @@
 
 use build::Builder;
 
-use rustc_const_math::{ConstInt, ConstUsize, ConstIsize};
-use rustc::middle::const_val::ConstVal;
 use rustc::ty::{self, Ty};
 
 use rustc::mir::*;
-use syntax::ast;
 use syntax_pos::{Span, DUMMY_SP};
 
 impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
@@ -35,14 +32,17 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
         place
     }
 
+    /// Convenience function for creating a literal operand, one
+    /// without any user type annotation.
     pub fn literal_operand(&mut self,
                            span: Span,
                            ty: Ty<'tcx>,
-                           literal: Literal<'tcx>)
+                           literal: &'tcx ty::Const<'tcx>)
                            -> Operand<'tcx> {
         let constant = box Constant {
             span,
             ty,
+            user_ty: None,
             literal,
         };
         Operand::Constant(constant)
@@ -55,64 +55,7 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
     // Returns a zero literal operand for the appropriate type, works for
     // bool, char and integers.
     pub fn zero_literal(&mut self, span: Span, ty: Ty<'tcx>) -> Operand<'tcx> {
-        let literal = match ty.sty {
-            ty::TyBool => {
-                self.hir.false_literal()
-            }
-            ty::TyChar => {
-                Literal::Value {
-                    value: self.hir.tcx().mk_const(ty::Const {
-                        val: ConstVal::Char('\0'),
-                        ty
-                    })
-                }
-            }
-            ty::TyUint(ity) => {
-                let val = match ity {
-                    ast::UintTy::U8  => ConstInt::U8(0),
-                    ast::UintTy::U16 => ConstInt::U16(0),
-                    ast::UintTy::U32 => ConstInt::U32(0),
-                    ast::UintTy::U64 => ConstInt::U64(0),
-                    ast::UintTy::U128 => ConstInt::U128(0),
-                    ast::UintTy::Us => {
-                        let uint_ty = self.hir.tcx().sess.target.usize_ty;
-                        let val = ConstUsize::new(0, uint_ty).unwrap();
-                        ConstInt::Usize(val)
-                    }
-                };
-
-                Literal::Value {
-                    value: self.hir.tcx().mk_const(ty::Const {
-                        val: ConstVal::Integral(val),
-                        ty
-                    })
-                }
-            }
-            ty::TyInt(ity) => {
-                let val = match ity {
-                    ast::IntTy::I8  => ConstInt::I8(0),
-                    ast::IntTy::I16 => ConstInt::I16(0),
-                    ast::IntTy::I32 => ConstInt::I32(0),
-                    ast::IntTy::I64 => ConstInt::I64(0),
-                    ast::IntTy::I128 => ConstInt::I128(0),
-                    ast::IntTy::Is => {
-                        let int_ty = self.hir.tcx().sess.target.isize_ty;
-                        let val = ConstIsize::new(0, int_ty).unwrap();
-                        ConstInt::Isize(val)
-                    }
-                };
-
-                Literal::Value {
-                    value: self.hir.tcx().mk_const(ty::Const {
-                        val: ConstVal::Integral(val),
-                        ty
-                    })
-                }
-            }
-            _ => {
-                span_bug!(span, "Invalid type for zero_literal: `{:?}`", ty)
-            }
-        };
+        let literal = ty::Const::from_bits(self.hir.tcx(), 0, ty::ParamEnv::empty().and(ty));
 
         self.literal_operand(span, ty, literal)
     }
@@ -129,6 +72,7 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
             Constant {
                 span: source_info.span,
                 ty: self.hir.usize_ty(),
+                user_ty: None,
                 literal: self.hir.usize_literal(value),
             });
         temp

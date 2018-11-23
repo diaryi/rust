@@ -68,22 +68,22 @@ This API is completely unstable and subject to change.
 #![doc(html_logo_url = "https://www.rust-lang.org/logos/rust-logo-128x128-blk-v2.png",
       html_favicon_url = "https://doc.rust-lang.org/favicon.ico",
       html_root_url = "https://doc.rust-lang.org/nightly/")]
-#![deny(warnings)]
 
 #![allow(non_camel_case_types)]
 
-#![feature(advanced_slice_patterns)]
 #![feature(box_patterns)]
 #![feature(box_syntax)]
 #![feature(crate_visibility_modifier)]
-#![feature(conservative_impl_trait)]
-#![feature(from_ref)]
-#![feature(match_default_bindings)]
-#![feature(never_type)]
+#![feature(exhaustive_patterns)]
+#![feature(nll)]
 #![feature(quote)]
 #![feature(refcell_replace_swap)]
 #![feature(rustc_diagnostic_macros)]
 #![feature(slice_patterns)]
+#![feature(slice_sort_by_cached_key)]
+#![feature(never_type)]
+
+#![recursion_limit="256"]
 
 #[macro_use] extern crate log;
 #[macro_use] extern crate syntax;
@@ -92,9 +92,10 @@ extern crate syntax_pos;
 extern crate arena;
 #[macro_use] extern crate rustc;
 extern crate rustc_platform_intrinsics as intrinsics;
-extern crate rustc_const_math;
 extern crate rustc_data_structures;
 extern crate rustc_errors as errors;
+extern crate rustc_target;
+extern crate smallvec;
 
 use rustc::hir;
 use rustc::lint;
@@ -102,34 +103,37 @@ use rustc::middle;
 use rustc::session;
 use rustc::util;
 
-use hir::map as hir_map;
+use hir::Node;
 use rustc::infer::InferOk;
 use rustc::ty::subst::Substs;
 use rustc::ty::{self, Ty, TyCtxt};
-use rustc::ty::maps::Providers;
-use rustc::traits::{FulfillmentContext, ObligationCause, ObligationCauseCode, Reveal};
+use rustc::ty::query::Providers;
+use rustc::traits::{ObligationCause, ObligationCauseCode, TraitEngine, TraitEngineExt};
+use rustc::util::profiling::ProfileCategory;
 use session::{CompileIncomplete, config};
 use util::common::time;
 
 use syntax::ast;
-use syntax::abi::Abi;
+use rustc_target::spec::abi::Abi;
 use syntax_pos::Span;
 
 use std::iter;
+
 // NB: This module needs to be declared first so diagnostics are
 // registered before they are used.
 mod diagnostics;
 
+mod astconv;
 mod check;
 mod check_unused;
-mod astconv;
+mod coherence;
 mod collect;
 mod constrained_type_params;
+mod structured_errors;
 mod impl_wf_check;
-mod coherence;
+mod namespace;
 mod outlives;
 mod variance;
-mod namespace;
 
 pub struct TypeAndSubsts<'tcx> {
     substs: &'tcx Substs<'tcx>,
@@ -142,7 +146,7 @@ fn require_c_abi_if_variadic(tcx: TyCtxt,
                              span: Span) {
     if decl.variadic && !(abi == Abi::C || abi == Abi::Cdecl) {
         let mut err = struct_span_err!(tcx.sess, span, E0045,
-                  "variadic function must have C or cdecl calling convention");
+            "variadic function must have C or cdecl calling convention");
         err.span_label(span, "variadics require C or cdecl calling convention").emit();
     }
 }
@@ -153,8 +157,8 @@ fn require_same_types<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
                                 actual: Ty<'tcx>)
                                 -> bool {
     tcx.infer_ctxt().enter(|ref infcx| {
-        let param_env = ty::ParamEnv::empty(Reveal::UserFacing);
-        let mut fulfill_cx = FulfillmentContext::new();
+        let param_env = ty::ParamEnv::empty();
+        let mut fulfill_cx = TraitEngine::new(infcx.tcx);
         match infcx.at(&cause, param_env).eq(expected, actual) {
             Ok(InferOk { obligations, .. }) => {
                 fulfill_cx.register_predicate_obligations(infcx, obligations);
@@ -168,7 +172,7 @@ fn require_same_types<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
         match fulfill_cx.select_all_or_error(infcx) {
             Ok(()) => true,
             Err(errors) => {
-                infcx.report_fulfillment_errors(&errors, None);
+                infcx.report_fulfillment_errors(&errors, None, false);
                 false
             }
         }
@@ -181,29 +185,46 @@ fn check_main_fn_ty<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
     let main_def_id = tcx.hir.local_def_id(main_id);
     let main_t = tcx.type_of(main_def_id);
     match main_t.sty {
-        ty::TyFnDef(..) => {
-            match tcx.hir.find(main_id) {
-                Some(hir_map::NodeItem(it)) => {
-                    match it.node {
-                        hir::ItemFn(.., ref generics, _) => {
-                            if !generics.params.is_empty() {
-                                struct_span_err!(tcx.sess, generics.span, E0131,
-                                         "main function is not allowed to have type parameters")
-                                    .span_label(generics.span,
-                                                "main cannot have type parameters")
-                                    .emit();
-                                return;
-                            }
-                        }
-                        _ => ()
+        ty::FnDef(..) => {
+            if let Some(Node::Item(it)) = tcx.hir.find(main_id) {
+                if let hir::ItemKind::Fn(.., ref generics, _) = it.node {
+                    let mut error = false;
+                    if !generics.params.is_empty() {
+                        let msg = "`main` function is not allowed to have generic \
+                                   parameters".to_owned();
+                        let label = "`main` cannot have generic parameters".to_string();
+                        struct_span_err!(tcx.sess, generics.span, E0131, "{}", msg)
+                            .span_label(generics.span, label)
+                            .emit();
+                        error = true;
+                    }
+                    if let Some(sp) = generics.where_clause.span() {
+                        struct_span_err!(tcx.sess, sp, E0646,
+                            "`main` function is not allowed to have a `where` clause")
+                            .span_label(sp, "`main` cannot have a `where` clause")
+                            .emit();
+                        error = true;
+                    }
+                    if error {
+                        return;
                     }
                 }
-                _ => ()
             }
-            let se_ty = tcx.mk_fn_ptr(ty::Binder(
+
+            let actual = tcx.fn_sig(main_def_id);
+            let expected_return_type = if tcx.lang_items().termination().is_some() {
+                // we take the return type of the given main function, the real check is done
+                // in `check_fn`
+                actual.output().skip_binder()
+            } else {
+                // standard () main return type
+                tcx.mk_unit()
+            };
+
+            let se_ty = tcx.mk_fn_ptr(ty::Binder::bind(
                 tcx.mk_fn_sig(
                     iter::empty(),
-                    tcx.mk_nil(),
+                    expected_return_type,
                     false,
                     hir::Unsafety::Normal,
                     Abi::Rust
@@ -214,7 +235,7 @@ fn check_main_fn_ty<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
                 tcx,
                 &ObligationCause::new(main_span, main_id, ObligationCauseCode::MainFunctionType),
                 se_ty,
-                tcx.mk_fn_ptr(tcx.fn_sig(main_def_id)));
+                tcx.mk_fn_ptr(actual));
         }
         _ => {
             span_bug!(main_span,
@@ -230,26 +251,32 @@ fn check_start_fn_ty<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
     let start_def_id = tcx.hir.local_def_id(start_id);
     let start_t = tcx.type_of(start_def_id);
     match start_t.sty {
-        ty::TyFnDef(..) => {
-            match tcx.hir.find(start_id) {
-                Some(hir_map::NodeItem(it)) => {
-                    match it.node {
-                        hir::ItemFn(..,ref ps,_)
-                        if !ps.params.is_empty() => {
-                            struct_span_err!(tcx.sess, ps.span, E0132,
-                                "start function is not allowed to have type parameters")
-                                .span_label(ps.span,
-                                            "start function cannot have type parameters")
-                                .emit();
-                            return;
-                        }
-                        _ => ()
+        ty::FnDef(..) => {
+            if let Some(Node::Item(it)) = tcx.hir.find(start_id) {
+                if let hir::ItemKind::Fn(.., ref generics, _) = it.node {
+                    let mut error = false;
+                    if !generics.params.is_empty() {
+                        struct_span_err!(tcx.sess, generics.span, E0132,
+                            "start function is not allowed to have type parameters")
+                            .span_label(generics.span,
+                                        "start function cannot have type parameters")
+                            .emit();
+                        error = true;
+                    }
+                    if let Some(sp) = generics.where_clause.span() {
+                        struct_span_err!(tcx.sess, sp, E0647,
+                            "start function is not allowed to have a `where` clause")
+                            .span_label(sp, "start function cannot have a `where` clause")
+                            .emit();
+                        error = true;
+                    }
+                    if error {
+                        return;
                     }
                 }
-                _ => ()
             }
 
-            let se_ty = tcx.mk_fn_ptr(ty::Binder(
+            let se_ty = tcx.mk_fn_ptr(ty::Binder::bind(
                 tcx.mk_fn_sig(
                     [
                         tcx.types.isize,
@@ -277,12 +304,10 @@ fn check_start_fn_ty<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
 }
 
 fn check_for_entry_fn<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>) {
-    if let Some((id, sp)) = *tcx.sess.entry_fn.borrow() {
-        match tcx.sess.entry_type.get() {
-            Some(config::EntryMain) => check_main_fn_ty(tcx, id, sp),
-            Some(config::EntryStart) => check_start_fn_ty(tcx, id, sp),
-            Some(config::EntryNone) => {}
-            None => bug!("entry function without a type")
+    if let Some((id, sp, entry_type)) = *tcx.sess.entry_fn.borrow() {
+        match entry_type {
+            config::EntryFnType::Main => check_main_fn_ty(tcx, id, sp),
+            config::EntryFnType::Start => check_start_fn_ty(tcx, id, sp),
         }
     }
 }
@@ -298,44 +323,46 @@ pub fn provide(providers: &mut Providers) {
 pub fn check_crate<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>)
                              -> Result<(), CompileIncomplete>
 {
-    let time_passes = tcx.sess.time_passes();
+    tcx.sess.profiler(|p| p.start_activity(ProfileCategory::TypeChecking));
 
     // this ensures that later parts of type checking can assume that items
     // have valid types and not error
     tcx.sess.track_errors(|| {
-        time(time_passes, "type collecting", ||
+        time(tcx.sess, "type collecting", ||
              collect::collect_item_types(tcx));
 
     })?;
 
     tcx.sess.track_errors(|| {
-        time(time_passes, "outlives testing", ||
+        time(tcx.sess, "outlives testing", ||
             outlives::test::test_inferred_outlives(tcx));
     })?;
 
     tcx.sess.track_errors(|| {
-        time(time_passes, "impl wf inference", ||
+        time(tcx.sess, "impl wf inference", ||
              impl_wf_check::impl_wf_check(tcx));
     })?;
 
     tcx.sess.track_errors(|| {
-      time(time_passes, "coherence checking", ||
+      time(tcx.sess, "coherence checking", ||
           coherence::check_coherence(tcx));
     })?;
 
     tcx.sess.track_errors(|| {
-        time(time_passes, "variance testing", ||
+        time(tcx.sess, "variance testing", ||
              variance::test::test_variance(tcx));
     })?;
 
-    time(time_passes, "wf checking", || check::check_wf_new(tcx))?;
+    time(tcx.sess, "wf checking", || check::check_wf_new(tcx))?;
 
-    time(time_passes, "item-types checking", || check::check_item_types(tcx))?;
+    time(tcx.sess, "item-types checking", || check::check_item_types(tcx))?;
 
-    time(time_passes, "item-bodies checking", || check::check_item_bodies(tcx))?;
+    time(tcx.sess, "item-bodies checking", || check::check_item_bodies(tcx))?;
 
     check_unused::check_crate(tcx);
     check_for_entry_fn(tcx);
+
+    tcx.sess.profiler(|p| p.end_activity(ProfileCategory::TypeChecking));
 
     tcx.sess.compile_status()
 }
@@ -349,11 +376,12 @@ pub fn hir_ty_to_ty<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>, hir_ty: &hir::Ty) -> 
     let env_node_id = tcx.hir.get_parent(hir_ty.id);
     let env_def_id = tcx.hir.local_def_id(env_node_id);
     let item_cx = self::collect::ItemCtxt::new(tcx, env_def_id);
+
     astconv::AstConv::ast_ty_to_ty(&item_cx, hir_ty)
 }
 
 pub fn hir_trait_to_predicates<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>, hir_trait: &hir::TraitRef)
-        -> (ty::PolyTraitRef<'tcx>, Vec<ty::PolyProjectionPredicate<'tcx>>) {
+        -> (ty::PolyTraitRef<'tcx>, Vec<(ty::PolyProjectionPredicate<'tcx>, Span)>) {
     // In case there are any projections etc, find the "environment"
     // def-id that will be used to determine the traits/predicates in
     // scope.  This is derived from the enclosing item-like thing.
@@ -364,6 +392,7 @@ pub fn hir_trait_to_predicates<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>, hir_trait:
     let principal = astconv::AstConv::instantiate_poly_trait_ref_inner(
         &item_cx, hir_trait, tcx.types.err, &mut projections, true
     );
+
     (principal, projections)
 }
 

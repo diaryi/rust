@@ -114,11 +114,11 @@
 //! unsupported file system and emit a warning in that case. This is not yet
 //! implemented.
 
-use rustc::hir::svh::Svh;
 use rustc::session::{Session, CrateDisambiguator};
-use rustc::util::fs as fs_util;
+use rustc_fs_util::{link_or_copy, LinkOrCopy};
 use rustc_data_structures::{flock, base_n};
 use rustc_data_structures::fx::{FxHashSet, FxHashMap};
+use rustc_data_structures::svh::Svh;
 
 use std::fs as std_fs;
 use std::io;
@@ -126,7 +126,7 @@ use std::mem;
 use std::path::{Path, PathBuf};
 use std::time::{UNIX_EPOCH, SystemTime, Duration};
 
-use rand::{thread_rng, Rng};
+use rand::{RngCore, thread_rng};
 
 const LOCK_FILE_EXT: &'static str = ".lock";
 const DEP_GRAPH_FILENAME: &'static str = "dep-graph.bin";
@@ -137,7 +137,7 @@ const QUERY_CACHE_FILENAME: &'static str = "query-cache.bin";
 // or hexadecimal numbers (we want short file and directory names). Since these
 // numbers will be used in file names, we choose an encoding that is not
 // case-sensitive (as opposed to base64, for example).
-const INT_ENCODE_BASE: u64 = 36;
+const INT_ENCODE_BASE: usize = base_n::CASE_INSENSITIVE;
 
 pub fn dep_graph_path(sess: &Session) -> PathBuf {
     in_incr_comp_dir_sess(sess, DEP_GRAPH_FILENAME)
@@ -219,7 +219,7 @@ pub fn prepare_session_directory(sess: &Session,
         }
     };
 
-    let mut source_directories_already_tried = FxHashSet();
+    let mut source_directories_already_tried = FxHashSet::default();
 
     loop {
         // Generate a session directory of the form:
@@ -357,7 +357,7 @@ pub fn finalize_session_directory(sess: &Session, svh: Svh) {
     let mut new_sub_dir_name = String::from(&old_sub_dir_name[.. dash_indices[2] + 1]);
 
     // Append the svh
-    base_n::push_str(svh.as_u64(), INT_ENCODE_BASE, &mut new_sub_dir_name);
+    base_n::push_str(svh.as_u64() as u128, INT_ENCODE_BASE, &mut new_sub_dir_name);
 
     // Create the full path
     let new_path = incr_comp_session_dir.parent().unwrap().join(new_sub_dir_name);
@@ -429,11 +429,11 @@ fn copy_files(sess: &Session,
                 let source_path = entry.path();
 
                 debug!("copying into session dir: {}", source_path.display());
-                match fs_util::link_or_copy(source_path, target_file_path) {
-                    Ok(fs_util::LinkOrCopy::Link) => {
+                match link_or_copy(source_path, target_file_path) {
+                    Ok(LinkOrCopy::Link) => {
                         files_linked += 1
                     }
-                    Ok(fs_util::LinkOrCopy::Copy) => {
+                    Ok(LinkOrCopy::Copy) => {
                         files_copied += 1
                     }
                     Err(_) => return Err(())
@@ -465,7 +465,7 @@ fn generate_session_dir_path(crate_dir: &Path) -> PathBuf {
 
     let directory_name = format!("s-{}-{}-working",
                                   timestamp,
-                                  base_n::encode(random_number as u64,
+                                  base_n::encode(random_number as u128,
                                                  INT_ENCODE_BASE));
     debug!("generate_session_dir_path: directory_name = {}", directory_name);
     let directory_path = crate_dir.join(directory_name);
@@ -490,7 +490,7 @@ fn create_dir(sess: &Session, path: &Path, dir_tag: &str) -> Result<(),()> {
     }
 }
 
-/// Allocate a the lock-file and lock it.
+/// Allocate the lock-file and lock it.
 fn lock_directory(sess: &Session,
                   session_dir: &Path)
                   -> Result<(flock::Lock, PathBuf), ()> {
@@ -599,11 +599,11 @@ fn timestamp_to_string(timestamp: SystemTime) -> String {
     let duration = timestamp.duration_since(UNIX_EPOCH).unwrap();
     let micros = duration.as_secs() * 1_000_000 +
                 (duration.subsec_nanos() as u64) / 1000;
-    base_n::encode(micros, INT_ENCODE_BASE)
+    base_n::encode(micros as u128, INT_ENCODE_BASE)
 }
 
 fn string_to_timestamp(s: &str) -> Result<SystemTime, ()> {
-    let micros_since_unix_epoch = u64::from_str_radix(s, 36);
+    let micros_since_unix_epoch = u64::from_str_radix(s, INT_ENCODE_BASE as u32);
 
     if micros_since_unix_epoch.is_err() {
         return Err(())
@@ -626,7 +626,8 @@ fn crate_path(sess: &Session,
     // The full crate disambiguator is really long. 64 bits of it should be
     // sufficient.
     let crate_disambiguator = crate_disambiguator.to_fingerprint().to_smaller_hash();
-    let crate_disambiguator = base_n::encode(crate_disambiguator, INT_ENCODE_BASE);
+    let crate_disambiguator = base_n::encode(crate_disambiguator as u128,
+                                             INT_ENCODE_BASE);
 
     let crate_name = format!("{}-{}", crate_name, crate_disambiguator);
     incr_dir.join(crate_name)
@@ -655,8 +656,8 @@ pub fn garbage_collect_session_directories(sess: &Session) -> io::Result<()> {
 
     // First do a pass over the crate directory, collecting lock files and
     // session directories
-    let mut session_directories = FxHashSet();
-    let mut lock_files = FxHashSet();
+    let mut session_directories = FxHashSet::default();
+    let mut lock_files = FxHashSet::default();
 
     for dir_entry in try!(crate_directory.read_dir()) {
         let dir_entry = match dir_entry {
@@ -732,6 +733,20 @@ pub fn garbage_collect_session_directories(sess: &Session) -> io::Result<()> {
                                 })
                                 .collect();
 
+    // Delete all session directories that don't have a lock file.
+    for directory_name in session_directories {
+        if !lock_file_to_session_dir.values().any(|dir| *dir == directory_name) {
+            let path = crate_directory.join(directory_name);
+            if let Err(err) = safe_remove_dir_all(&path) {
+                sess.warn(&format!("Failed to garbage collect invalid incremental \
+                                    compilation session directory `{}`: {}",
+                                    path.display(),
+                                    err));
+            }
+        }
+    }
+
+    // Now garbage collect the valid session directories.
     let mut deletion_candidates = vec![];
     let mut definitely_delete = vec![];
 
@@ -860,7 +875,7 @@ fn all_except_most_recent(deletion_candidates: Vec<(SystemTime, PathBuf, Option<
                            .map(|(_, path, lock)| (path, lock))
                            .collect()
     } else {
-        FxHashMap()
+        FxHashMap::default()
     }
 }
 
@@ -909,7 +924,7 @@ fn test_all_except_most_recent() {
     assert_eq!(all_except_most_recent(
         vec![
         ]).keys().cloned().collect::<FxHashSet<PathBuf>>(),
-        FxHashSet()
+        FxHashSet::default()
     );
 }
 
@@ -924,7 +939,7 @@ fn test_timestamp_serialization() {
 
 #[test]
 fn test_find_source_directory_in_iter() {
-    let already_visited = FxHashSet();
+    let already_visited = FxHashSet::default();
 
     // Find newest
     assert_eq!(find_source_directory_in_iter(

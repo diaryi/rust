@@ -9,17 +9,13 @@
 // except according to those terms.
 
 use hir::def_id::DefId;
-use infer::type_variable;
-use middle::const_val::ConstVal;
-use ty::{self, BoundRegion, DefIdTree, Region, Ty, TyCtxt};
-
+use ty::{self, BoundRegion, Region, Ty, TyCtxt};
+use std::borrow::Cow;
 use std::fmt;
-use syntax::abi;
+use rustc_target::spec::abi;
 use syntax::ast;
-use errors::DiagnosticBuilder;
+use errors::{Applicability, DiagnosticBuilder};
 use syntax_pos::Span;
-
-use rustc_const_math::ConstInt;
 
 use hir;
 
@@ -56,10 +52,7 @@ pub enum TypeError<'tcx> {
     CyclicTy(Ty<'tcx>),
     ProjectionMismatched(ExpectedFound<DefId>),
     ProjectionBoundsLength(ExpectedFound<usize>),
-    TyParamDefaultMismatch(ExpectedFound<type_variable::Default<'tcx>>),
-    ExistentialMismatch(ExpectedFound<&'tcx ty::Slice<ty::ExistentialPredicate<'tcx>>>),
-
-    OldStyleLUB(Box<TypeError<'tcx>>),
+    ExistentialMismatch(ExpectedFound<&'tcx ty::List<ty::ExistentialPredicate<'tcx>>>),
 }
 
 #[derive(Clone, RustcEncodable, RustcDecodable, PartialEq, Eq, Hash, Debug, Copy)]
@@ -74,10 +67,10 @@ pub enum UnconstrainedNumeric {
 /// afterwards to present additional details, particularly when it comes to lifetime-related
 /// errors.
 impl<'tcx> fmt::Display for TypeError<'tcx> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         use self::TypeError::*;
-        fn report_maybe_different(f: &mut fmt::Formatter,
-                                  expected: String, found: String) -> fmt::Result {
+        fn report_maybe_different(f: &mut fmt::Formatter<'_>,
+                                  expected: &str, found: &str) -> fmt::Result {
             // A naive approach to making sure that we're not reporting silly errors such as:
             // (expected closure, found closure).
             if expected == found {
@@ -132,15 +125,15 @@ impl<'tcx> fmt::Display for TypeError<'tcx> {
                        br)
             }
             Sorts(values) => ty::tls::with(|tcx| {
-                report_maybe_different(f, values.expected.sort_string(tcx),
-                                       values.found.sort_string(tcx))
+                report_maybe_different(f, &values.expected.sort_string(tcx),
+                                       &values.found.sort_string(tcx))
             }),
             Traits(values) => ty::tls::with(|tcx| {
                 report_maybe_different(f,
-                                       format!("trait `{}`",
-                                               tcx.item_path_str(values.expected)),
-                                       format!("trait `{}`",
-                                               tcx.item_path_str(values.found)))
+                                       &format!("trait `{}`",
+                                                tcx.item_path_str(values.expected)),
+                                       &format!("trait `{}`",
+                                                tcx.item_path_str(values.found)))
             }),
             IntMismatch(ref values) => {
                 write!(f, "expected `{:?}`, found `{:?}`",
@@ -167,90 +160,80 @@ impl<'tcx> fmt::Display for TypeError<'tcx> {
                        values.expected,
                        values.found)
             },
-            TyParamDefaultMismatch(ref values) => {
-                write!(f, "conflicting type parameter defaults `{}` and `{}`",
-                       values.expected.ty,
-                       values.found.ty)
-            }
             ExistentialMismatch(ref values) => {
-                report_maybe_different(f, format!("trait `{}`", values.expected),
-                                       format!("trait `{}`", values.found))
-            }
-            OldStyleLUB(ref err) => {
-                write!(f, "{}", err)
+                report_maybe_different(f, &format!("trait `{}`", values.expected),
+                                       &format!("trait `{}`", values.found))
             }
         }
     }
 }
 
 impl<'a, 'gcx, 'lcx, 'tcx> ty::TyS<'tcx> {
-    pub fn sort_string(&self, tcx: TyCtxt<'a, 'gcx, 'lcx>) -> String {
+    pub fn sort_string(&self, tcx: TyCtxt<'a, 'gcx, 'lcx>) -> Cow<'static, str> {
         match self.sty {
-            ty::TyBool | ty::TyChar | ty::TyInt(_) |
-            ty::TyUint(_) | ty::TyFloat(_) | ty::TyStr | ty::TyNever => self.to_string(),
-            ty::TyTuple(ref tys, _) if tys.is_empty() => self.to_string(),
+            ty::Bool | ty::Char | ty::Int(_) |
+            ty::Uint(_) | ty::Float(_) | ty::Str | ty::Never => self.to_string().into(),
+            ty::Tuple(ref tys) if tys.is_empty() => self.to_string().into(),
 
-            ty::TyAdt(def, _) => format!("{} `{}`", def.descr(), tcx.item_path_str(def.did)),
-            ty::TyForeign(def_id) => format!("extern type `{}`", tcx.item_path_str(def_id)),
-            ty::TyArray(_, n) => {
-                if let ConstVal::Integral(ConstInt::Usize(n)) = n.val {
-                    format!("array of {} elements", n)
-                } else {
-                    "array".to_string()
+            ty::Adt(def, _) => format!("{} `{}`", def.descr(), tcx.item_path_str(def.did)).into(),
+            ty::Foreign(def_id) => format!("extern type `{}`", tcx.item_path_str(def_id)).into(),
+            ty::Array(_, n) => {
+                match n.assert_usize(tcx) {
+                    Some(n) => format!("array of {} elements", n).into(),
+                    None => "array".into(),
                 }
             }
-            ty::TySlice(_) => "slice".to_string(),
-            ty::TyRawPtr(_) => "*-ptr".to_string(),
-            ty::TyRef(region, tymut) => {
+            ty::Slice(_) => "slice".into(),
+            ty::RawPtr(_) => "*-ptr".into(),
+            ty::Ref(region, ty, mutbl) => {
+                let tymut = ty::TypeAndMut { ty, mutbl };
                 let tymut_string = tymut.to_string();
                 if tymut_string == "_" ||         //unknown type name,
                    tymut_string.len() > 10 ||     //name longer than saying "reference",
                    region.to_string() != ""       //... or a complex type
                 {
-                    match tymut {
-                        ty::TypeAndMut{mutbl, ..} => {
-                            format!("{}reference", match mutbl {
-                                hir::Mutability::MutMutable => "mutable ",
-                                _ => ""
-                            })
-                        }
-                    }
+                    format!("{}reference", match mutbl {
+                        hir::Mutability::MutMutable => "mutable ",
+                        _ => ""
+                    }).into()
                 } else {
-                    format!("&{}", tymut_string)
+                    format!("&{}", tymut_string).into()
                 }
             }
-            ty::TyFnDef(..) => format!("fn item"),
-            ty::TyFnPtr(_) => "fn pointer".to_string(),
-            ty::TyDynamic(ref inner, ..) => {
-                inner.principal().map_or_else(|| "trait".to_string(),
-                    |p| format!("trait {}", tcx.item_path_str(p.def_id())))
+            ty::FnDef(..) => "fn item".into(),
+            ty::FnPtr(_) => "fn pointer".into(),
+            ty::Dynamic(ref inner, ..) => {
+                format!("trait {}", tcx.item_path_str(inner.principal().def_id())).into()
             }
-            ty::TyClosure(..) => "closure".to_string(),
-            ty::TyGenerator(..) => "generator".to_string(),
-            ty::TyTuple(..) => "tuple".to_string(),
-            ty::TyInfer(ty::TyVar(_)) => "inferred type".to_string(),
-            ty::TyInfer(ty::IntVar(_)) => "integral variable".to_string(),
-            ty::TyInfer(ty::FloatVar(_)) => "floating-point variable".to_string(),
-            ty::TyInfer(ty::FreshTy(_)) => "skolemized type".to_string(),
-            ty::TyInfer(ty::FreshIntTy(_)) => "skolemized integral type".to_string(),
-            ty::TyInfer(ty::FreshFloatTy(_)) => "skolemized floating-point type".to_string(),
-            ty::TyProjection(_) => "associated type".to_string(),
-            ty::TyParam(ref p) => {
+            ty::Closure(..) => "closure".into(),
+            ty::Generator(..) => "generator".into(),
+            ty::GeneratorWitness(..) => "generator witness".into(),
+            ty::Tuple(..) => "tuple".into(),
+            ty::Infer(ty::TyVar(_)) => "inferred type".into(),
+            ty::Infer(ty::IntVar(_)) => "integral variable".into(),
+            ty::Infer(ty::FloatVar(_)) => "floating-point variable".into(),
+            ty::Bound(_) |
+            ty::Infer(ty::FreshTy(_)) => "fresh type".into(),
+            ty::Infer(ty::FreshIntTy(_)) => "fresh integral type".into(),
+            ty::Infer(ty::FreshFloatTy(_)) => "fresh floating-point type".into(),
+            ty::Projection(_) => "associated type".into(),
+            ty::UnnormalizedProjection(_) => "non-normalized associated type".into(),
+            ty::Param(ref p) => {
                 if p.is_self() {
-                    "Self".to_string()
+                    "Self".into()
                 } else {
-                    "type parameter".to_string()
+                    "type parameter".into()
                 }
             }
-            ty::TyAnon(..) => "anonymized type".to_string(),
-            ty::TyError => "type error".to_string(),
+            ty::Opaque(..) => "opaque type".into(),
+            ty::Error => "type error".into(),
         }
     }
 }
 
 impl<'a, 'gcx, 'tcx> TyCtxt<'a, 'gcx, 'tcx> {
     pub fn note_and_explain_type_err(self,
-                                     db: &mut DiagnosticBuilder,
+                                     db: &mut DiagnosticBuilder<'_>,
                                      err: &TypeError<'tcx>,
                                      sp: Span) {
         use self::TypeError::*;
@@ -263,49 +246,21 @@ impl<'a, 'gcx, 'tcx> TyCtxt<'a, 'gcx, 'tcx> {
                     db.note("no two closures, even if identical, have the same type");
                     db.help("consider boxing your closure and/or using it as a trait object");
                 }
+                if let (ty::Infer(ty::IntVar(_)), ty::Float(_)) =
+                       (&values.found.sty, &values.expected.sty) // Issue #53280
+                {
+                    if let Ok(snippet) = self.sess.source_map().span_to_snippet(sp) {
+                        if snippet.chars().all(|c| c.is_digit(10) || c == '-' || c == '_') {
+                            db.span_suggestion_with_applicability(
+                                sp,
+                                "use a float literal",
+                                format!("{}.0", snippet),
+                                Applicability::MachineApplicable
+                            );
+                        }
+                    }
+                }
             },
-            TyParamDefaultMismatch(values) => {
-                let expected = values.expected;
-                let found = values.found;
-                db.span_note(sp, &format!("conflicting type parameter defaults `{}` and `{}`",
-                                          expected.ty,
-                                          found.ty));
-
-                match self.hir.span_if_local(expected.def_id) {
-                    Some(span) => {
-                        db.span_note(span, "a default was defined here...");
-                    }
-                    None => {
-                        let item_def_id = self.parent(expected.def_id).unwrap();
-                        db.note(&format!("a default is defined on `{}`",
-                                         self.item_path_str(item_def_id)));
-                    }
-                }
-
-                db.span_note(
-                    expected.origin_span,
-                    "...that was applied to an unconstrained type variable here");
-
-                match self.hir.span_if_local(found.def_id) {
-                    Some(span) => {
-                        db.span_note(span, "a second default was defined here...");
-                    }
-                    None => {
-                        let item_def_id = self.parent(found.def_id).unwrap();
-                        db.note(&format!("a second default is defined on `{}`",
-                                         self.item_path_str(item_def_id)));
-                    }
-                }
-
-                db.span_note(found.origin_span,
-                             "...that also applies to the same type variable here");
-            }
-            OldStyleLUB(err) => {
-                db.note("this was previously accepted by the compiler but has been phased out");
-                db.note("for more information, see https://github.com/rust-lang/rust/issues/45852");
-
-                self.note_and_explain_type_err(db, &err, sp);
-            }
             CyclicTy(ty) => {
                 // Watch out for various cases of cyclic types and try to explain.
                 if ty.is_closure() || ty.is_generator() {

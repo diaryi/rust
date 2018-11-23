@@ -43,8 +43,8 @@
 //!
 //! `Rc<T>` automatically dereferences to `T` (via the [`Deref`] trait),
 //! so you can call `T`'s methods on a value of type [`Rc<T>`][`Rc`]. To avoid name
-//! clashes with `T`'s methods, the methods of [`Rc<T>`][`Rc`] itself are [associated
-//! functions][assoc], called using function-like syntax:
+//! clashes with `T`'s methods, the methods of [`Rc<T>`][`Rc`] itself are associated
+//! functions, called using function-like syntax:
 //!
 //! ```
 //! use std::rc::Rc;
@@ -234,7 +234,6 @@
 //! [downgrade]: struct.Rc.html#method.downgrade
 //! [upgrade]: struct.Weak.html#method.upgrade
 //! [`None`]: ../../std/option/enum.Option.html#variant.None
-//! [assoc]: ../../book/first-edition/method-syntax.html#associated-functions
 //! [mutability]: ../../std/cell/index.html#introducing-mutability-inside-of-something-immutable
 
 #![stable(feature = "rust1", since = "1.0.0")]
@@ -252,14 +251,16 @@ use core::fmt;
 use core::hash::{Hash, Hasher};
 use core::intrinsics::abort;
 use core::marker;
-use core::marker::{Unsize, PhantomData};
-use core::mem::{self, align_of_val, forget, size_of_val, uninitialized};
+use core::marker::{Unpin, Unsize, PhantomData};
+use core::mem::{self, align_of_val, forget, size_of_val};
 use core::ops::Deref;
-use core::ops::CoerceUnsized;
-use core::ptr::{self, Shared};
+use core::ops::{CoerceUnsized, DispatchFromDyn};
+use core::pin::Pin;
+use core::ptr::{self, NonNull};
 use core::convert::From;
+use core::usize;
 
-use heap::{Heap, Alloc, Layout, box_free};
+use alloc::{Global, Alloc, Layout, box_free, handle_alloc_error};
 use string::String;
 use vec::Vec;
 
@@ -280,9 +281,10 @@ struct RcBox<T: ?Sized> {
 /// type `T`.
 ///
 /// [get_mut]: #method.get_mut
+#[cfg_attr(not(test), lang = "rc")]
 #[stable(feature = "rust1", since = "1.0.0")]
 pub struct Rc<T: ?Sized> {
-    ptr: Shared<RcBox<T>>,
+    ptr: NonNull<RcBox<T>>,
     phantom: PhantomData<T>,
 }
 
@@ -293,6 +295,9 @@ impl<T: ?Sized> !marker::Sync for Rc<T> {}
 
 #[unstable(feature = "coerce_unsized", issue = "27732")]
 impl<T: ?Sized + Unsize<U>, U: ?Sized> CoerceUnsized<Rc<U>> for Rc<T> {}
+
+#[unstable(feature = "dispatch_from_dyn", issue = "0")]
+impl<T: ?Sized + Unsize<U>, U: ?Sized> DispatchFromDyn<Rc<U>> for Rc<T> {}
 
 impl<T> Rc<T> {
     /// Constructs a new `Rc<T>`.
@@ -311,13 +316,18 @@ impl<T> Rc<T> {
             // pointers, which ensures that the weak destructor never frees
             // the allocation while the strong destructor is running, even
             // if the weak pointer is stored inside the strong one.
-            ptr: Shared::from(Box::into_unique(box RcBox {
+            ptr: Box::into_raw_non_null(box RcBox {
                 strong: Cell::new(1),
                 weak: Cell::new(1),
                 value,
-            })),
+            }),
             phantom: PhantomData,
         }
+    }
+
+    #[unstable(feature = "pin", issue = "49150")]
+    pub fn pinned(value: T) -> Pin<Rc<T>> {
+        unsafe { Pin::new_unchecked(Rc::new(value)) }
     }
 
     /// Returns the contained value, if the `Rc` has exactly one strong reference.
@@ -428,7 +438,7 @@ impl<T: ?Sized> Rc<T> {
         let rc_ptr = set_data_ptr(fake_ptr, (ptr as *mut u8).offset(-offset));
 
         Rc {
-            ptr: Shared::new_unchecked(rc_ptr),
+            ptr: NonNull::new_unchecked(rc_ptr),
             phantom: PhantomData,
         }
     }
@@ -449,6 +459,8 @@ impl<T: ?Sized> Rc<T> {
     #[stable(feature = "rc_weak", since = "1.4.0")]
     pub fn downgrade(this: &Self) -> Weak<T> {
         this.inc_weak();
+        // Make sure we do not create a dangling Weak
+        debug_assert!(!is_dangling(this.ptr));
         Weak { ptr: this.ptr }
     }
 
@@ -618,15 +630,14 @@ impl<T: Clone> Rc<T> {
     }
 }
 
-impl Rc<Any> {
+impl Rc<dyn Any> {
     #[inline]
-    #[unstable(feature = "rc_downcast", issue = "44608")]
+    #[stable(feature = "rc_downcast", since = "1.29.0")]
     /// Attempt to downcast the `Rc<Any>` to a concrete type.
     ///
     /// # Examples
     ///
     /// ```
-    /// #![feature(rc_downcast)]
     /// use std::any::Any;
     /// use std::rc::Rc;
     ///
@@ -642,17 +653,11 @@ impl Rc<Any> {
     ///     print_if_string(Rc::new(0i8));
     /// }
     /// ```
-    pub fn downcast<T: Any>(self) -> Result<Rc<T>, Rc<Any>> {
+    pub fn downcast<T: Any>(self) -> Result<Rc<T>, Rc<dyn Any>> {
         if (*self).is::<T>() {
-            // avoid the pointer arithmetic in from_raw
-            unsafe {
-                let raw: *const RcBox<Any> = self.ptr.as_ptr();
-                forget(self);
-                Ok(Rc {
-                    ptr: Shared::new_unchecked(raw as *const RcBox<T> as *mut _),
-                    phantom: PhantomData,
-                })
-            }
+            let ptr = self.ptr.cast::<RcBox<T>>();
+            forget(self);
+            Ok(Rc { ptr, phantom: PhantomData })
         } else {
             Err(self)
         }
@@ -662,16 +667,20 @@ impl Rc<Any> {
 impl<T: ?Sized> Rc<T> {
     // Allocates an `RcBox<T>` with sufficient space for an unsized value
     unsafe fn allocate_for_ptr(ptr: *const T) -> *mut RcBox<T> {
-        // Create a fake RcBox to find allocation size and alignment
-        let fake_ptr = ptr as *mut RcBox<T>;
+        // Calculate layout using the given value.
+        // Previously, layout was calculated on the expression
+        // `&*(ptr as *const RcBox<T>)`, but this created a misaligned
+        // reference (see #54908).
+        let layout = Layout::new::<RcBox<()>>()
+            .extend(Layout::for_value(&*ptr)).unwrap().0
+            .pad_to_align().unwrap();
 
-        let layout = Layout::for_value(&*fake_ptr);
+        let mem = Global.alloc(layout)
+            .unwrap_or_else(|_| handle_alloc_error(layout));
 
-        let mem = Heap.alloc(layout)
-            .unwrap_or_else(|e| Heap.oom(e));
-
-        // Initialize the real RcBox
-        let inner = set_data_ptr(ptr as *mut T, mem) as *mut RcBox<T>;
+        // Initialize the RcBox
+        let inner = set_data_ptr(ptr as *mut T, mem.as_ptr() as *mut u8) as *mut RcBox<T>;
+        debug_assert_eq!(Layout::for_value(&*inner), layout);
 
         ptr::write(&mut (*inner).strong, Cell::new(1));
         ptr::write(&mut (*inner).weak, Cell::new(1));
@@ -681,7 +690,8 @@ impl<T: ?Sized> Rc<T> {
 
     fn from_box(v: Box<T>) -> Rc<T> {
         unsafe {
-            let bptr = Box::into_raw(v);
+            let box_unique = Box::into_unique(v);
+            let bptr = box_unique.as_ptr();
 
             let value_size = size_of_val(&*bptr);
             let ptr = Self::allocate_for_ptr(bptr);
@@ -693,9 +703,9 @@ impl<T: ?Sized> Rc<T> {
                 value_size);
 
             // Free the allocation without dropping its contents
-            box_free(bptr);
+            box_free(box_unique);
 
-            Rc { ptr: Shared::new_unchecked(ptr), phantom: PhantomData }
+            Rc { ptr: NonNull::new_unchecked(ptr), phantom: PhantomData }
         }
     }
 }
@@ -722,7 +732,7 @@ impl<T> Rc<[T]> {
             &mut (*ptr).value as *mut [T] as *mut T,
             v.len());
 
-        Rc { ptr: Shared::new_unchecked(ptr), phantom: PhantomData }
+        Rc { ptr: NonNull::new_unchecked(ptr), phantom: PhantomData }
     }
 }
 
@@ -737,7 +747,7 @@ impl<T: Clone> RcFromSlice<T> for Rc<[T]> {
         // In the event of a panic, elements that have been written
         // into the new RcBox will be dropped, then the memory freed.
         struct Guard<T> {
-            mem: *mut u8,
+            mem: NonNull<u8>,
             elems: *mut T,
             layout: Layout,
             n_elems: usize,
@@ -751,7 +761,7 @@ impl<T: Clone> RcFromSlice<T> for Rc<[T]> {
                     let slice = from_raw_parts_mut(self.elems, self.n_elems);
                     ptr::drop_in_place(slice);
 
-                    Heap.dealloc(self.mem, self.layout.clone());
+                    Global.dealloc(self.mem, self.layout.clone());
                 }
             }
         }
@@ -767,21 +777,21 @@ impl<T: Clone> RcFromSlice<T> for Rc<[T]> {
             let elems = &mut (*ptr).value as *mut [T] as *mut T;
 
             let mut guard = Guard{
-                mem: mem,
+                mem: NonNull::new_unchecked(mem),
                 elems: elems,
                 layout: layout,
                 n_elems: 0,
             };
 
             for (i, item) in v.iter().enumerate() {
-                ptr::write(elems.offset(i as isize), item.clone());
+                ptr::write(elems.add(i), item.clone());
                 guard.n_elems += 1;
             }
 
             // All clear. Forget the guard so it doesn't free the new RcBox.
             forget(guard);
 
-            Rc { ptr: Shared::new_unchecked(ptr), phantom: PhantomData }
+            Rc { ptr: NonNull::new_unchecked(ptr), phantom: PhantomData }
         }
     }
 }
@@ -809,9 +819,7 @@ unsafe impl<#[may_dangle] T: ?Sized> Drop for Rc<T> {
     ///
     /// This will decrement the strong reference count. If the strong reference
     /// count reaches zero then the only other references (if any) are
-    /// [`Weak`][weak], so we `drop` the inner value.
-    ///
-    /// [weak]: struct.Weak.html
+    /// [`Weak`], so we `drop` the inner value.
     ///
     /// # Examples
     ///
@@ -834,8 +842,6 @@ unsafe impl<#[may_dangle] T: ?Sized> Drop for Rc<T> {
     /// ```
     fn drop(&mut self) {
         unsafe {
-            let ptr = self.ptr.as_ptr();
-
             self.dec_strong();
             if self.strong() == 0 {
                 // destroy the contained object
@@ -846,7 +852,7 @@ unsafe impl<#[may_dangle] T: ?Sized> Drop for Rc<T> {
                 self.dec_weak();
 
                 if self.weak() == 0 {
-                    Heap.dealloc(ptr as *mut u8, Layout::for_value(&*ptr));
+                    Global.dealloc(self.ptr.cast(), Layout::for_value(self.ptr.as_ref()));
                 }
             }
         }
@@ -867,7 +873,7 @@ impl<T: ?Sized> Clone for Rc<T> {
     ///
     /// let five = Rc::new(5);
     ///
-    /// Rc::clone(&five);
+    /// let _ = Rc::clone(&five);
     /// ```
     #[inline]
     fn clone(&self) -> Rc<T> {
@@ -1099,7 +1105,8 @@ impl<'a, T: Clone> From<&'a [T]> for Rc<[T]> {
 impl<'a> From<&'a str> for Rc<str> {
     #[inline]
     fn from(v: &str) -> Rc<str> {
-        unsafe { mem::transmute(<Rc<[u8]>>::from(v.as_bytes())) }
+        let rc = Rc::<[u8]>::from(v.as_bytes());
+        unsafe { Rc::from_raw(Rc::into_raw(rc) as *const str) }
     }
 }
 
@@ -1159,7 +1166,12 @@ impl<T> From<Vec<T>> for Rc<[T]> {
 /// [`None`]: ../../std/option/enum.Option.html#variant.None
 #[stable(feature = "rc_weak", since = "1.4.0")]
 pub struct Weak<T: ?Sized> {
-    ptr: Shared<RcBox<T>>,
+    // This is a `NonNull` to allow optimizing the size of this type in enums,
+    // but it is not necessarily a valid pointer.
+    // `Weak::new` sets this to `usize::MAX` so that it doesn’t need
+    // to allocate space on the heap.  That's not a value a real pointer
+    // will ever have because RcBox has alignment at least 2.
+    ptr: NonNull<RcBox<T>>,
 }
 
 #[stable(feature = "rc_weak", since = "1.4.0")]
@@ -1170,11 +1182,13 @@ impl<T: ?Sized> !marker::Sync for Weak<T> {}
 #[unstable(feature = "coerce_unsized", issue = "27732")]
 impl<T: ?Sized + Unsize<U>, U: ?Sized> CoerceUnsized<Weak<U>> for Weak<T> {}
 
+#[unstable(feature = "dispatch_from_dyn", issue = "0")]
+impl<T: ?Sized + Unsize<U>, U: ?Sized> DispatchFromDyn<Weak<U>> for Weak<T> {}
+
 impl<T> Weak<T> {
-    /// Constructs a new `Weak<T>`, allocating memory for `T` without initializing
-    /// it. Calling [`upgrade`] on the return value always gives [`None`].
+    /// Constructs a new `Weak<T>`, without allocating any memory.
+    /// Calling [`upgrade`][Weak::upgrade] on the return value always gives [`None`].
     ///
-    /// [`upgrade`]: struct.Weak.html#method.upgrade
     /// [`None`]: ../../std/option/enum.Option.html
     ///
     /// # Examples
@@ -1187,16 +1201,15 @@ impl<T> Weak<T> {
     /// ```
     #[stable(feature = "downgraded_weak", since = "1.10.0")]
     pub fn new() -> Weak<T> {
-        unsafe {
-            Weak {
-                ptr: Shared::from(Box::into_unique(box RcBox {
-                    strong: Cell::new(0),
-                    weak: Cell::new(1),
-                    value: uninitialized(),
-                })),
-            }
+        Weak {
+            ptr: NonNull::new(usize::MAX as *mut RcBox<T>).expect("MAX is not 0"),
         }
     }
+}
+
+pub(crate) fn is_dangling<T: ?Sized>(ptr: NonNull<T>) -> bool {
+    let address = ptr.as_ptr() as *mut () as usize;
+    address == usize::MAX
 }
 
 impl<T: ?Sized> Weak<T> {
@@ -1228,11 +1241,23 @@ impl<T: ?Sized> Weak<T> {
     /// ```
     #[stable(feature = "rc_weak", since = "1.4.0")]
     pub fn upgrade(&self) -> Option<Rc<T>> {
-        if self.strong() == 0 {
+        let inner = self.inner()?;
+        if inner.strong() == 0 {
             None
         } else {
-            self.inc_strong();
+            inner.inc_strong();
             Some(Rc { ptr: self.ptr, phantom: PhantomData })
+        }
+    }
+
+    /// Return `None` when the pointer is dangling and there is no allocated `RcBox`,
+    /// i.e. this `Weak` was created by `Weak::new`
+    #[inline]
+    fn inner(&self) -> Option<&RcBox<T>> {
+        if is_dangling(self.ptr) {
+            None
+        } else {
+            Some(unsafe { self.ptr.as_ref() })
         }
     }
 }
@@ -1264,14 +1289,14 @@ impl<T: ?Sized> Drop for Weak<T> {
     /// assert!(other_weak_foo.upgrade().is_none());
     /// ```
     fn drop(&mut self) {
-        unsafe {
-            let ptr = self.ptr.as_ptr();
-
-            self.dec_weak();
+        if let Some(inner) = self.inner() {
+            inner.dec_weak();
             // the weak count starts at 1, and will only go to zero if all
             // the strong pointers have disappeared.
-            if self.weak() == 0 {
-                Heap.dealloc(ptr as *mut u8, Layout::for_value(&*ptr));
+            if inner.weak() == 0 {
+                unsafe {
+                    Global.dealloc(self.ptr.cast(), Layout::for_value(self.ptr.as_ref()));
+                }
             }
         }
     }
@@ -1288,11 +1313,13 @@ impl<T: ?Sized> Clone for Weak<T> {
     ///
     /// let weak_five = Rc::downgrade(&Rc::new(5));
     ///
-    /// Weak::clone(&weak_five);
+    /// let _ = Weak::clone(&weak_five);
     /// ```
     #[inline]
     fn clone(&self) -> Weak<T> {
-        self.inc_weak();
+        if let Some(inner) = self.inner() {
+            inner.inc_weak()
+        }
         Weak { ptr: self.ptr }
     }
 }
@@ -1307,9 +1334,8 @@ impl<T: ?Sized + fmt::Debug> fmt::Debug for Weak<T> {
 #[stable(feature = "downgraded_weak", since = "1.10.0")]
 impl<T> Default for Weak<T> {
     /// Constructs a new `Weak<T>`, allocating memory for `T` without initializing
-    /// it. Calling [`upgrade`] on the return value always gives [`None`].
+    /// it. Calling [`upgrade`][Weak::upgrade] on the return value always gives [`None`].
     ///
-    /// [`upgrade`]: struct.Weak.html#method.upgrade
     /// [`None`]: ../../std/option/enum.Option.html
     ///
     /// # Examples
@@ -1325,7 +1351,7 @@ impl<T> Default for Weak<T> {
     }
 }
 
-// NOTE: We checked_add here to deal with mem::forget safety. In particular
+// NOTE: We checked_add here to deal with mem::forget safely. In particular
 // if you mem::forget Rcs (or Weaks), the ref-count can overflow, and then
 // you can free the allocation while outstanding Rcs (or Weaks) exist.
 // We abort because this is such a degenerate scenario that we don't care about
@@ -1345,7 +1371,14 @@ trait RcBoxPtr<T: ?Sized> {
 
     #[inline]
     fn inc_strong(&self) {
-        self.inner().strong.set(self.strong().checked_add(1).unwrap_or_else(|| unsafe { abort() }));
+        // We want to abort on overflow instead of dropping the value.
+        // The reference count will never be zero when this is called;
+        // nevertheless, we insert an abort here to hint LLVM at
+        // an otherwise missed optimization.
+        if self.strong() == 0 || self.strong() == usize::max_value() {
+            unsafe { abort(); }
+        }
+        self.inner().strong.set(self.strong() + 1);
     }
 
     #[inline]
@@ -1360,7 +1393,14 @@ trait RcBoxPtr<T: ?Sized> {
 
     #[inline]
     fn inc_weak(&self) {
-        self.inner().weak.set(self.weak().checked_add(1).unwrap_or_else(|| unsafe { abort() }));
+        // We want to abort on overflow instead of dropping the value.
+        // The reference count will never be zero when this is called;
+        // nevertheless, we insert an abort here to hint LLVM at
+        // an otherwise missed optimization.
+        if self.weak() == 0 || self.weak() == usize::max_value() {
+            unsafe { abort(); }
+        }
+        self.inner().weak.set(self.weak() + 1);
     }
 
     #[inline]
@@ -1378,12 +1418,10 @@ impl<T: ?Sized> RcBoxPtr<T> for Rc<T> {
     }
 }
 
-impl<T: ?Sized> RcBoxPtr<T> for Weak<T> {
+impl<T: ?Sized> RcBoxPtr<T> for RcBox<T> {
     #[inline(always)]
     fn inner(&self) -> &RcBox<T> {
-        unsafe {
-            self.ptr.as_ref()
-        }
+        self
     }
 }
 
@@ -1545,7 +1583,7 @@ mod tests {
         assert_eq!(unsafe { &*ptr }, "foo");
         assert_eq!(rc, rc2);
 
-        let rc: Rc<Display> = Rc::new(123);
+        let rc: Rc<dyn Display> = Rc::new(123);
 
         let ptr = Rc::into_raw(rc.clone());
         let rc2 = unsafe { Rc::from_raw(ptr) };
@@ -1746,8 +1784,8 @@ mod tests {
         use std::fmt::Display;
         use std::string::ToString;
 
-        let b: Box<Display> = box 123;
-        let r: Rc<Display> = Rc::from(b);
+        let b: Box<dyn Display> = box 123;
+        let r: Rc<dyn Display> = Rc::from(b);
 
         assert_eq!(r.to_string(), "123");
     }
@@ -1756,8 +1794,8 @@ mod tests {
     fn test_from_box_trait_zero_sized() {
         use std::fmt::Debug;
 
-        let b: Box<Debug> = box ();
-        let r: Rc<Debug> = Rc::from(b);
+        let b: Box<dyn Debug> = box ();
+        let r: Rc<dyn Debug> = Rc::from(b);
 
         assert_eq!(format!("{:?}", r), "()");
     }
@@ -1774,8 +1812,8 @@ mod tests {
     fn test_downcast() {
         use std::any::Any;
 
-        let r1: Rc<Any> = Rc::new(i32::max_value());
-        let r2: Rc<Any> = Rc::new("abc");
+        let r1: Rc<dyn Any> = Rc::new(i32::max_value());
+        let r2: Rc<dyn Any> = Rc::new("abc");
 
         assert!(r1.clone().downcast::<u32>().is_err());
 
@@ -1804,3 +1842,6 @@ impl<T: ?Sized> AsRef<T> for Rc<T> {
         &**self
     }
 }
+
+#[unstable(feature = "pin", issue = "49150")]
+impl<T: ?Sized> Unpin for Rc<T> { }

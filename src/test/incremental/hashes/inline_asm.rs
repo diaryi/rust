@@ -16,7 +16,7 @@
 // and make sure that the hash has changed, then change nothing between rev2 and
 // rev3 and make sure that the hash has not changed.
 
-// must-compile-successfully
+// compile-pass
 // revisions: cfail1 cfail2 cfail3
 // compile-flags: -Z query-dep-graph -Zincremental-ignore-spans
 
@@ -236,6 +236,3 @@ pub fn change_options(_a: i32) -> i32 {
     }
     _out
 }
-
-
-

@@ -9,58 +9,101 @@
 // except according to those terms.
 
 use ty;
-
+use hir::map::definitions::FIRST_FREE_HIGH_DEF_INDEX;
 use rustc_data_structures::indexed_vec::Idx;
 use serialize;
 use std::fmt;
 use std::u32;
 
-newtype_index!(CrateNum
-    {
+newtype_index! {
+    pub struct CrateId {
         ENCODABLE = custom
-        DEBUG_FORMAT = "crate{}",
+    }
+}
 
-        /// Item definitions in the currently-compiled crate would have the CrateNum
-        /// LOCAL_CRATE in their DefId.
-        const LOCAL_CRATE = 0,
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum CrateNum {
+    /// Virtual crate for builtin macros
+    // FIXME(jseyfried): this is also used for custom derives until proc-macro crates get
+    // `CrateNum`s.
+    BuiltinMacros,
+    /// A CrateNum value that indicates that something is wrong.
+    Invalid,
+    /// A special CrateNum that we use for the tcx.rcache when decoding from
+    /// the incr. comp. cache.
+    ReservedForIncrCompCache,
+    Index(CrateId),
+}
 
-        /// Virtual crate for builtin macros
-        // FIXME(jseyfried): this is also used for custom derives until proc-macro crates get
-        // `CrateNum`s.
-        const BUILTIN_MACROS_CRATE = u32::MAX,
+impl ::std::fmt::Debug for CrateNum {
+    fn fmt(&self, fmt: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        match self {
+            CrateNum::Index(id) => write!(fmt, "crate{}", id.private),
+            CrateNum::Invalid => write!(fmt, "invalid crate"),
+            CrateNum::BuiltinMacros => write!(fmt, "builtin macros crate"),
+            CrateNum::ReservedForIncrCompCache => write!(fmt, "crate for decoding incr comp cache"),
+        }
+    }
+}
 
-        /// A CrateNum value that indicates that something is wrong.
-        const INVALID_CRATE = u32::MAX - 1,
+/// Item definitions in the currently-compiled crate would have the CrateNum
+/// LOCAL_CRATE in their DefId.
+pub const LOCAL_CRATE: CrateNum = CrateNum::Index(CrateId::from_u32_const(0));
 
-        /// A special CrateNum that we use for the tcx.rcache when decoding from
-        /// the incr. comp. cache.
-        const RESERVED_FOR_INCR_COMP_CACHE = u32::MAX - 2,
-    });
+
+impl Idx for CrateNum {
+    #[inline]
+    fn new(value: usize) -> Self {
+        CrateNum::Index(Idx::new(value))
+    }
+
+    #[inline]
+    fn index(self) -> usize {
+        match self {
+            CrateNum::Index(idx) => Idx::index(idx),
+            _ => bug!("Tried to get crate index of {:?}", self),
+        }
+    }
+}
 
 impl CrateNum {
     pub fn new(x: usize) -> CrateNum {
-        assert!(x < (u32::MAX as usize));
-        CrateNum(x as u32)
+        CrateNum::from_usize(x)
+    }
+
+    pub fn from_usize(x: usize) -> CrateNum {
+        CrateNum::Index(CrateId::from_usize(x))
     }
 
     pub fn from_u32(x: u32) -> CrateNum {
-        CrateNum(x)
+        CrateNum::Index(CrateId::from_u32(x))
     }
 
-    pub fn as_usize(&self) -> usize {
-        self.0 as usize
+    pub fn as_usize(self) -> usize {
+        match self {
+            CrateNum::Index(id) => id.as_usize(),
+            _ => bug!("tried to get index of nonstandard crate {:?}", self),
+        }
     }
 
-    pub fn as_u32(&self) -> u32 {
-        self.0
+    pub fn as_u32(self) -> u32 {
+        match self {
+            CrateNum::Index(id) => id.as_u32(),
+            _ => bug!("tried to get index of nonstandard crate {:?}", self),
+        }
     }
 
     pub fn as_def_id(&self) -> DefId { DefId { krate: *self, index: CRATE_DEF_INDEX } }
 }
 
 impl fmt::Display for CrateNum {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        fmt::Display::fmt(&self.0, f)
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            CrateNum::Index(id) => fmt::Display::fmt(&id.private, f),
+            CrateNum::Invalid => write!(f, "invalid crate"),
+            CrateNum::BuiltinMacros => write!(f, "builtin macros crate"),
+            CrateNum::ReservedForIncrCompCache => write!(f, "crate for decoding incr comp cache"),
+        }
     }
 }
 
@@ -71,30 +114,25 @@ impl serialize::UseSpecializedDecodable for CrateNum {}
 /// particular definition. It should really be considered an interned
 /// shorthand for a particular DefPath.
 ///
-/// At the moment we are allocating the numerical values of DefIndexes into two
-/// ranges: the "low" range (starting at zero) and the "high" range (starting at
-/// DEF_INDEX_HI_START). This allows us to allocate the DefIndexes of all
-/// item-likes (Items, TraitItems, and ImplItems) into one of these ranges and
+/// At the moment we are allocating the numerical values of DefIndexes from two
+/// address spaces: DefIndexAddressSpace::Low and DefIndexAddressSpace::High.
+/// This allows us to allocate the DefIndexes of all item-likes
+/// (Items, TraitItems, and ImplItems) into one of these spaces and
 /// consequently use a simple array for lookup tables keyed by DefIndex and
 /// known to be densely populated. This is especially important for the HIR map.
 ///
 /// Since the DefIndex is mostly treated as an opaque ID, you probably
-/// don't have to care about these ranges.
-newtype_index!(DefIndex
-    {
-        ENCODABLE = custom
-        DEBUG_FORMAT = custom,
+/// don't have to care about these address spaces.
 
-        /// The start of the "high" range of DefIndexes.
-        const DEF_INDEX_HI_START = 1 << 31,
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Copy)]
+pub struct DefIndex(u32);
 
-        /// The crate root is always assigned index 0 by the AST Map code,
-        /// thanks to `NodeCollector::new`.
-        const CRATE_DEF_INDEX = 0,
-    });
+/// The crate root is always assigned index 0 by the AST Map code,
+/// thanks to `NodeCollector::new`.
+pub const CRATE_DEF_INDEX: DefIndex = DefIndex(0);
 
 impl fmt::Debug for DefIndex {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f,
                "DefIndex({}:{})",
                self.address_space().index(),
@@ -104,47 +142,67 @@ impl fmt::Debug for DefIndex {
 
 impl DefIndex {
     #[inline]
-    pub fn from_u32(x: u32) -> DefIndex {
-        DefIndex(x)
-    }
-
-    #[inline]
-    pub fn as_usize(&self) -> usize {
-        self.0 as usize
-    }
-
-    #[inline]
-    pub fn as_u32(&self) -> u32 {
-        self.0
-    }
-
-    #[inline]
     pub fn address_space(&self) -> DefIndexAddressSpace {
-        if self.0 < DEF_INDEX_HI_START.0 {
-            DefIndexAddressSpace::Low
-        } else {
-            DefIndexAddressSpace::High
+        match self.0 & 1 {
+            0 => DefIndexAddressSpace::Low,
+            1 => DefIndexAddressSpace::High,
+            _ => unreachable!()
         }
     }
 
     /// Converts this DefIndex into a zero-based array index.
-    /// This index is the offset within the given "range" of the DefIndex,
-    /// that is, if the DefIndex is part of the "high" range, the resulting
-    /// index will be (DefIndex - DEF_INDEX_HI_START).
+    /// This index is the offset within the given DefIndexAddressSpace.
     #[inline]
     pub fn as_array_index(&self) -> usize {
-        (self.0 & !DEF_INDEX_HI_START.0) as usize
+        (self.0 >> 1) as usize
     }
 
+    #[inline]
     pub fn from_array_index(i: usize, address_space: DefIndexAddressSpace) -> DefIndex {
-        DefIndex::new(address_space.start() + i)
+        DefIndex::from_raw_u32(((i << 1) | (address_space as usize)) as u32)
+    }
+
+    // Proc macros from a proc-macro crate have a kind of virtual DefIndex. This
+    // function maps the index of the macro within the crate (which is also the
+    // index of the macro in the CrateMetadata::proc_macros array) to the
+    // corresponding DefIndex.
+    pub fn from_proc_macro_index(proc_macro_index: usize) -> DefIndex {
+        // DefIndex for proc macros start from FIRST_FREE_HIGH_DEF_INDEX,
+        // because the first FIRST_FREE_HIGH_DEF_INDEX indexes are reserved
+        // for internal use.
+        let def_index = DefIndex::from_array_index(
+            proc_macro_index.checked_add(FIRST_FREE_HIGH_DEF_INDEX)
+                .expect("integer overflow adding `proc_macro_index`"),
+            DefIndexAddressSpace::High);
+        assert!(def_index != CRATE_DEF_INDEX);
+        def_index
+    }
+
+    // This function is the reverse of from_proc_macro_index() above.
+    pub fn to_proc_macro_index(self: DefIndex) -> usize {
+        assert_eq!(self.address_space(), DefIndexAddressSpace::High);
+
+        self.as_array_index().checked_sub(FIRST_FREE_HIGH_DEF_INDEX)
+            .unwrap_or_else(|| {
+                bug!("using local index {:?} as proc-macro index", self)
+            })
+    }
+
+    // Don't use this if you don't know about the DefIndex encoding.
+    pub fn from_raw_u32(x: u32) -> DefIndex {
+        DefIndex(x)
+    }
+
+    // Don't use this if you don't know about the DefIndex encoding.
+    pub fn as_raw_u32(&self) -> u32 {
+        self.0
     }
 }
 
 impl serialize::UseSpecializedEncodable for DefIndex {}
 impl serialize::UseSpecializedDecodable for DefIndex {}
 
-#[derive(Copy, Clone, Eq, PartialEq, Hash)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum DefIndexAddressSpace {
     Low = 0,
     High = 1,
@@ -155,25 +213,20 @@ impl DefIndexAddressSpace {
     pub fn index(&self) -> usize {
         *self as usize
     }
-
-    #[inline]
-    pub fn start(&self) -> usize {
-        self.index() * DEF_INDEX_HI_START.as_usize()
-    }
 }
 
-/// A DefId identifies a particular *definition*, by combining a crate
+/// A `DefId` identifies a particular *definition*, by combining a crate
 /// index and a def index.
-#[derive(Clone, Eq, Ord, PartialOrd, PartialEq, Hash, Copy)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Copy)]
 pub struct DefId {
     pub krate: CrateNum,
     pub index: DefIndex,
 }
 
 impl fmt::Debug for DefId {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "DefId({:?}/{}:{}",
-               self.krate.index(),
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "DefId({}/{}:{}",
+               self.krate,
                self.index.address_space().index(),
                self.index.as_array_index())?;
 
@@ -215,11 +268,10 @@ impl serialize::UseSpecializedDecodable for DefId {}
 /// few cases where we know that only DefIds from the local crate are expected
 /// and a DefId from a different crate would signify a bug somewhere. This
 /// is when LocalDefId comes in handy.
-#[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct LocalDefId(DefIndex);
 
 impl LocalDefId {
-
     #[inline]
     pub fn from_def_id(def_id: DefId) -> LocalDefId {
         assert!(def_id.is_local());
@@ -236,7 +288,7 @@ impl LocalDefId {
 }
 
 impl fmt::Debug for LocalDefId {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.to_def_id().fmt(f)
     }
 }

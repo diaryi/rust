@@ -22,10 +22,9 @@
 //
 // Ensuring that both `T: 'a` and `'b: 'a` holds does work (`elements_outlive`).
 
-// compile-flags:-Znll -Zborrowck=mir -Zverbose
+// compile-flags:-Zborrowck=mir -Zverbose
 
 #![allow(warnings)]
-#![feature(dyn_trait)]
 #![feature(rustc_attrs)]
 
 use std::cell::Cell;
@@ -54,9 +53,8 @@ where
     T: Anything<'b>,
 {
     with_signature(cell, t, |cell, t| require(cell, t));
-    //~^ WARNING not reporting region error due to -Znll
-    //~| ERROR the parameter type `T` may not live long enough
-    //~| ERROR does not outlive free region
+    //~^ ERROR the parameter type `T` may not live long enough
+    //~| ERROR
 }
 
 #[rustc_regions]
@@ -66,9 +64,8 @@ where
     'a: 'a,
 {
     with_signature(cell, t, |cell, t| require(cell, t));
-    //~^ WARNING not reporting region error due to -Znll
-    //~| ERROR the parameter type `T` may not live long enough
-    //~| ERROR does not outlive free region
+    //~^ ERROR the parameter type `T` may not live long enough
+    //~| ERROR
 }
 
 #[rustc_regions]
@@ -77,20 +74,10 @@ where
     T: Anything<'b>,
     T::AssocType: 'a,
 {
-    // This error is unfortunate. This code ought to type-check: we
-    // are projecting `<T as Anything<'b>>::AssocType`, and we know
-    // that this outlives `'a` because of the where-clause. However,
-    // the way the region checker works, we don't register this
-    // outlives obligation, and hence we get an error: this is because
-    // what we see is a projection like `<T as
-    // Anything<'?0>>::AssocType`, and we don't yet know if `?0` will
-    // equal `'b` or not, so we ignore the where-clause. Obviously we
-    // can do better here with a more involved verification step.
+    // We are projecting `<T as Anything<'b>>::AssocType`, and we know
+    // that this outlives `'a` because of the where-clause.
 
     with_signature(cell, t, |cell, t| require(cell, t));
-    //~^ WARNING not reporting region error due to -Znll
-    //~| ERROR the parameter type `T` may not live long enough
-    //~| ERROR free region `ReEarlyBound(1, 'b)` does not outlive free region `ReEarlyBound(0, 'a)`
 }
 
 #[rustc_regions]

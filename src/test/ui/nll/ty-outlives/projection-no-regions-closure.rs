@@ -8,14 +8,13 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-// compile-flags:-Znll -Zborrowck=mir -Zverbose
+// compile-flags:-Zborrowck=mir -Zverbose
 
 // Tests closures that propagate an outlives relationship to their
 // creator where the subject is a projection with no regions (`<T as
 // Iterator>::Item`, to be exact).
 
 #![allow(warnings)]
-#![feature(dyn_trait)]
 #![feature(rustc_attrs)]
 
 trait Anything { }
@@ -34,8 +33,7 @@ where
     T: Iterator,
 {
     with_signature(x, |mut y| Box::new(y.next()))
-    //~^ WARNING not reporting region error due to -Znll
-    //~| ERROR the associated type `<T as std::iter::Iterator>::Item` may not live long enough
+    //~^ ERROR the associated type `<T as std::iter::Iterator>::Item` may not live long enough
 }
 
 #[rustc_regions]
@@ -52,8 +50,7 @@ where
     T: 'b + Iterator,
 {
     with_signature(x, |mut y| Box::new(y.next()))
-    //~^ WARNING not reporting region error due to -Znll
-    //~| ERROR the associated type `<T as std::iter::Iterator>::Item` may not live long enough
+    //~^ ERROR the associated type `<T as std::iter::Iterator>::Item` may not live long enough
 }
 
 #[rustc_regions]

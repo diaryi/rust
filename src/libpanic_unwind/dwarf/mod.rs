@@ -29,7 +29,7 @@ struct Unaligned<T>(T);
 
 impl DwarfReader {
     pub fn new(ptr: *const u8) -> DwarfReader {
-        DwarfReader { ptr: ptr }
+        DwarfReader { ptr }
     }
 
     // DWARF streams are packed, so e.g. a u32 would not necessarily be aligned
@@ -38,7 +38,7 @@ impl DwarfReader {
     // telling the backend to generate "misalignment-safe" code.
     pub unsafe fn read<T: Copy>(&mut self) -> T {
         let Unaligned(result) = *(self.ptr as *const Unaligned<T>);
-        self.ptr = self.ptr.offset(mem::size_of::<T>() as isize);
+        self.ptr = self.ptr.add(mem::size_of::<T>());
         result
     }
 

@@ -8,6 +8,8 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+#![allow(stable_features)]
+
 #![feature(extended_compare_and_swap)]
 use std::sync::atomic::{AtomicIsize, ATOMIC_ISIZE_INIT};
 use std::sync::atomic::Ordering::*;
@@ -15,7 +17,7 @@ use std::sync::atomic::Ordering::*;
 static ATOMIC: AtomicIsize = ATOMIC_ISIZE_INIT;
 
 fn main() {
-    // Make sure trans can emit all the intrinsics correctly
+    // Make sure codegen can emit all the intrinsics correctly
     ATOMIC.compare_exchange(0, 1, Relaxed, Relaxed).ok();
     ATOMIC.compare_exchange(0, 1, Acquire, Relaxed).ok();
     ATOMIC.compare_exchange(0, 1, Release, Relaxed).ok();

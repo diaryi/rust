@@ -8,6 +8,8 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+#![allow(dead_code)]
+#![allow(unused_variables)]
 // Type ascription doesn't lead to unsoundness
 
 #![feature(type_ascription)]
@@ -40,6 +42,6 @@ fn main() {
     assert_eq!(b, 1: u16);
 
     let mut v = Vec::new();
-    v: Vec<u8> = vec![1, 2, 3]; // Lvalue type ascription
+    v: Vec<u8> = vec![1, 2, 3]; // Place expression type ascription
     assert_eq!(v, [1u8, 2, 3]);
 }

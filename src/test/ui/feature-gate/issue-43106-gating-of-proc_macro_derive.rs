@@ -13,7 +13,7 @@
 // not descend further into the mod for other occurrences of the same
 // error.
 //
-// This file sits on its own because the the "weird" occurrences here
+// This file sits on its own because the "weird" occurrences here
 // signal errors, making it incompatible with the "warnings only"
 // nature of issue-43106-gating-of-builtin-attrs.rs
 
@@ -40,3 +40,5 @@ mod proc_macro_derive2 {
     #[proc_macro_derive = "2500"] impl S { }
     //~^ ERROR the `#[proc_macro_derive]` attribute may only be used on bare functions
 }
+
+fn main() {}

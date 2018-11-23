@@ -11,9 +11,9 @@
 use io::{self, Error, ErrorKind};
 use libc::{self, c_int, gid_t, pid_t, uid_t};
 use ptr;
-
 use sys::cvt;
 use sys::process::process_common::*;
+use sys;
 
 ////////////////////////////////////////////////////////////////////////////////
 // Command
@@ -22,8 +22,6 @@ use sys::process::process_common::*;
 impl Command {
     pub fn spawn(&mut self, default: Stdio, needs_stdin: bool)
                  -> io::Result<(Process, StdioPipes)> {
-        use sys;
-
         const CLOEXEC_MSG_FOOTER: &'static [u8] = b"NOEX";
 
         let envp = self.capture_env();
@@ -34,10 +32,28 @@ impl Command {
         }
 
         let (ours, theirs) = self.setup_io(default, needs_stdin)?;
+
+        if let Some(ret) = self.posix_spawn(&theirs, envp.as_ref())? {
+            return Ok((ret, ours))
+        }
+
         let (input, output) = sys::pipe::anon_pipe()?;
 
+        // Whatever happens after the fork is almost for sure going to touch or
+        // look at the environment in one way or another (PATH in `execvp` or
+        // accessing the `environ` pointer ourselves). Make sure no other thread
+        // is accessing the environment when we do the fork itself.
+        //
+        // Note that as soon as we're done with the fork there's no need to hold
+        // a lock any more because the parent won't do anything and the child is
+        // in its own process.
+        let result = unsafe {
+            let _env_lock = sys::os::env_lock();
+            cvt(libc::fork())?
+        };
+
         let pid = unsafe {
-            match cvt(libc::fork())? {
+            match result {
                 0 => {
                     drop(input);
                     let err = self.do_exec(theirs, envp.as_ref());
@@ -109,7 +125,16 @@ impl Command {
         }
 
         match self.setup_io(default, true) {
-            Ok((_, theirs)) => unsafe { self.do_exec(theirs, envp.as_ref()) },
+            Ok((_, theirs)) => {
+                unsafe {
+                    // Similar to when forking, we want to ensure that access to
+                    // the environment is synchronized, so make sure to grab the
+                    // environment lock before we try to exec.
+                    let _lock = sys::os::env_lock();
+
+                    self.do_exec(theirs, envp.as_ref())
+                }
+            }
             Err(e) => e,
         }
     }
@@ -188,9 +213,6 @@ impl Command {
         if let Some(ref cwd) = *self.get_cwd() {
             t!(cvt(libc::chdir(cwd.as_ptr())));
         }
-        if let Some(envp) = maybe_envp {
-            *sys::os::environ() = envp.as_ptr();
-        }
 
         // emscripten has no signal support.
         #[cfg(not(any(target_os = "emscripten")))]
@@ -226,8 +248,144 @@ impl Command {
             t!(callback());
         }
 
+        // Although we're performing an exec here we may also return with an
+        // error from this function (without actually exec'ing) in which case we
+        // want to be sure to restore the global environment back to what it
+        // once was, ensuring that our temporary override, when free'd, doesn't
+        // corrupt our process's environment.
+        let mut _reset = None;
+        if let Some(envp) = maybe_envp {
+            struct Reset(*const *const libc::c_char);
+
+            impl Drop for Reset {
+                fn drop(&mut self) {
+                    unsafe {
+                        *sys::os::environ() = self.0;
+                    }
+                }
+            }
+
+            _reset = Some(Reset(*sys::os::environ()));
+            *sys::os::environ() = envp.as_ptr();
+        }
+
         libc::execvp(self.get_argv()[0], self.get_argv().as_ptr());
         io::Error::last_os_error()
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "freebsd",
+                  all(target_os = "linux", target_env = "gnu"))))]
+    fn posix_spawn(&mut self, _: &ChildPipes, _: Option<&CStringArray>)
+        -> io::Result<Option<Process>>
+    {
+        Ok(None)
+    }
+
+    // Only support platforms for which posix_spawn() can return ENOENT
+    // directly.
+    #[cfg(any(target_os = "macos", target_os = "freebsd",
+              all(target_os = "linux", target_env = "gnu")))]
+    fn posix_spawn(&mut self, stdio: &ChildPipes, envp: Option<&CStringArray>)
+        -> io::Result<Option<Process>>
+    {
+        use mem;
+        use sys;
+
+        if self.get_cwd().is_some() ||
+            self.get_gid().is_some() ||
+            self.get_uid().is_some() ||
+            self.env_saw_path() ||
+            self.get_closures().len() != 0 {
+            return Ok(None)
+        }
+
+        // Only glibc 2.24+ posix_spawn() supports returning ENOENT directly.
+        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        {
+            if let Some(version) = sys::os::glibc_version() {
+                if version < (2, 24) {
+                    return Ok(None)
+                }
+            } else {
+                return Ok(None)
+            }
+        }
+
+        let mut p = Process { pid: 0, status: None };
+
+        struct PosixSpawnFileActions(libc::posix_spawn_file_actions_t);
+
+        impl Drop for PosixSpawnFileActions {
+            fn drop(&mut self) {
+                unsafe {
+                    libc::posix_spawn_file_actions_destroy(&mut self.0);
+                }
+            }
+        }
+
+        struct PosixSpawnattr(libc::posix_spawnattr_t);
+
+        impl Drop for PosixSpawnattr {
+            fn drop(&mut self) {
+                unsafe {
+                    libc::posix_spawnattr_destroy(&mut self.0);
+                }
+            }
+        }
+
+        unsafe {
+            let mut file_actions = PosixSpawnFileActions(mem::uninitialized());
+            let mut attrs = PosixSpawnattr(mem::uninitialized());
+
+            libc::posix_spawnattr_init(&mut attrs.0);
+            libc::posix_spawn_file_actions_init(&mut file_actions.0);
+
+            if let Some(fd) = stdio.stdin.fd() {
+                cvt(libc::posix_spawn_file_actions_adddup2(&mut file_actions.0,
+                                                           fd,
+                                                           libc::STDIN_FILENO))?;
+            }
+            if let Some(fd) = stdio.stdout.fd() {
+                cvt(libc::posix_spawn_file_actions_adddup2(&mut file_actions.0,
+                                                           fd,
+                                                           libc::STDOUT_FILENO))?;
+            }
+            if let Some(fd) = stdio.stderr.fd() {
+                cvt(libc::posix_spawn_file_actions_adddup2(&mut file_actions.0,
+                                                           fd,
+                                                           libc::STDERR_FILENO))?;
+            }
+
+            let mut set: libc::sigset_t = mem::uninitialized();
+            cvt(libc::sigemptyset(&mut set))?;
+            cvt(libc::posix_spawnattr_setsigmask(&mut attrs.0,
+                                                 &set))?;
+            cvt(libc::sigaddset(&mut set, libc::SIGPIPE))?;
+            cvt(libc::posix_spawnattr_setsigdefault(&mut attrs.0,
+                                                    &set))?;
+
+            let flags = libc::POSIX_SPAWN_SETSIGDEF |
+                libc::POSIX_SPAWN_SETSIGMASK;
+            cvt(libc::posix_spawnattr_setflags(&mut attrs.0, flags as _))?;
+
+            // Make sure we synchronize access to the global `environ` resource
+            let _env_lock = sys::os::env_lock();
+            let envp = envp.map(|c| c.as_ptr())
+                .unwrap_or_else(|| *sys::os::environ() as *const _);
+            let ret = libc::posix_spawnp(
+                &mut p.pid,
+                self.get_argv()[0],
+                &file_actions.0,
+                &attrs.0,
+                self.get_argv().as_ptr() as *const _,
+                envp as *const _,
+            );
+            if ret == 0 {
+                Ok(Some(p))
+            } else {
+                Err(io::Error::from_raw_os_error(ret))
+            }
+        }
     }
 }
 

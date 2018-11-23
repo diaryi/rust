@@ -12,10 +12,11 @@ use fmt;
 use hash;
 use io;
 use mem;
-use net::{lookup_host, ntoh, hton, IpAddr, Ipv4Addr, Ipv6Addr};
+use net::{ntoh, hton, IpAddr, Ipv4Addr, Ipv6Addr};
 use option;
 use sys::net::netc as c;
 use sys_common::{FromInner, AsInner, IntoInner};
+use sys_common::net::lookup_host;
 use vec;
 use iter;
 use slice;
@@ -25,6 +26,9 @@ use slice;
 /// Internet socket addresses consist of an [IP address], a 16-bit port number, as well
 /// as possibly some version-dependent additional information. See [`SocketAddrV4`]'s and
 /// [`SocketAddrV6`]'s respective documentation for more details.
+///
+/// The size of a `SocketAddr` instance may vary depending on the target operating
+/// system.
 ///
 /// [IP address]: ../../std/net/enum.IpAddr.html
 /// [`SocketAddrV4`]: ../../std/net/struct.SocketAddrV4.html
@@ -59,6 +63,9 @@ pub enum SocketAddr {
 ///
 /// See [`SocketAddr`] for a type encompassing both IPv4 and IPv6 socket addresses.
 ///
+/// The size of a `SocketAddrV4` struct may vary depending on the target operating
+/// system.
+///
 /// [IETF RFC 793]: https://tools.ietf.org/html/rfc793
 /// [IPv4 address]: ../../std/net/struct.Ipv4Addr.html
 /// [`SocketAddr`]: ../../std/net/enum.SocketAddr.html
@@ -85,6 +92,9 @@ pub struct SocketAddrV4 { inner: c::sockaddr_in }
 /// (see [IETF RFC 2553, Section 3.3] for more details).
 ///
 /// See [`SocketAddr`] for a type encompassing both IPv4 and IPv6 socket addresses.
+///
+/// The size of a `SocketAddrV6` struct may vary depending on the target operating
+/// system.
 ///
 /// [IETF RFC 2553, Section 3.3]: https://tools.ietf.org/html/rfc2553#section-3.3
 /// [IPv6 address]: ../../std/net/struct.Ipv6Addr.html
@@ -544,6 +554,7 @@ impl FromInner<c::sockaddr_in6> for SocketAddrV6 {
 
 #[stable(feature = "ip_from_ip", since = "1.16.0")]
 impl From<SocketAddrV4> for SocketAddr {
+    /// Converts a [`SocketAddrV4`] into a [`SocketAddr::V4`].
     fn from(sock4: SocketAddrV4) -> SocketAddr {
         SocketAddr::V4(sock4)
     }
@@ -551,6 +562,7 @@ impl From<SocketAddrV4> for SocketAddr {
 
 #[stable(feature = "ip_from_ip", since = "1.16.0")]
 impl From<SocketAddrV6> for SocketAddr {
+    /// Converts a [`SocketAddrV6`] into a [`SocketAddr::V6`].
     fn from(sock6: SocketAddrV6) -> SocketAddr {
         SocketAddr::V6(sock6)
     }
@@ -558,6 +570,12 @@ impl From<SocketAddrV6> for SocketAddr {
 
 #[stable(feature = "addr_from_into_ip", since = "1.17.0")]
 impl<I: Into<IpAddr>> From<(I, u16)> for SocketAddr {
+    /// Converts a tuple struct (Into<[`IpAddr`]>, `u16`) into a [`SocketAddr`].
+    ///
+    /// This conversion creates a [`SocketAddr::V4`] for a [`IpAddr::V4`]
+    /// and creates a [`SocketAddr::V6`] for a [`IpAddr::V6`].
+    ///
+    /// `u16` is treated as port of the newly created [`SocketAddr`].
     fn from(pieces: (I, u16)) -> SocketAddr {
         SocketAddr::new(pieces.0.into(), pieces.1)
     }

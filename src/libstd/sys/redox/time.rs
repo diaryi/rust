@@ -144,7 +144,7 @@ impl Instant {
 
     pub fn sub_instant(&self, other: &Instant) -> Duration {
         self.t.sub_timespec(&other.t).unwrap_or_else(|_| {
-            panic!("other was less than the current instant")
+            panic!("specified instant was later than self")
         })
     }
 
@@ -187,7 +187,7 @@ impl SystemTime {
 
 impl From<syscall::TimeSpec> for SystemTime {
     fn from(t: syscall::TimeSpec) -> SystemTime {
-        SystemTime { t: Timespec { t: t } }
+        SystemTime { t: Timespec { t } }
     }
 }
 

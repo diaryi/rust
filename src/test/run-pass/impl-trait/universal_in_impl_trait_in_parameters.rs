@@ -8,7 +8,8 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-#![feature(universal_impl_trait)]
+// run-pass
+
 use std::fmt::Display;
 
 fn check_display_eq(iter: impl IntoIterator<Item = impl Display>) {

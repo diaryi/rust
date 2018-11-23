@@ -98,7 +98,7 @@ pub struct PoisonError<T> {
 }
 
 /// An enumeration of possible errors associated with a [`TryLockResult`] which
-/// can occur while trying to aquire a lock, from the [`try_lock`] method on a
+/// can occur while trying to acquire a lock, from the [`try_lock`] method on a
 /// [`Mutex`] or the [`try_read`] and [`try_write`] methods on an [`RwLock`].
 ///
 /// [`Mutex`]: struct.Mutex.html
@@ -174,7 +174,7 @@ impl<T> PoisonError<T> {
     /// [`RwLock::read`]: ../../std/sync/struct.RwLock.html#method.read
     #[stable(feature = "sync_poison", since = "1.2.0")]
     pub fn new(guard: T) -> PoisonError<T> {
-        PoisonError { guard: guard }
+        PoisonError { guard }
     }
 
     /// Consumes this error indicating that a lock is poisoned, returning the
@@ -251,7 +251,7 @@ impl<T> Error for TryLockError<T> {
         }
     }
 
-    fn cause(&self) -> Option<&Error> {
+    fn cause(&self) -> Option<&dyn Error> {
         match *self {
             TryLockError::Poisoned(ref p) => Some(p),
             _ => None

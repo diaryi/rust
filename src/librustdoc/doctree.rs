@@ -11,13 +11,13 @@
 //! This module is used to store stuff from Rust's AST in a more convenient
 //! manner (and with prettier names) before cleaning.
 pub use self::StructType::*;
-pub use self::TypeBound::*;
 
-use syntax::abi;
 use syntax::ast;
 use syntax::ast::{Name, NodeId};
 use syntax::attr;
+use syntax::ext::base::MacroKind;
 use syntax::ptr::P;
+use syntax::source_map::Spanned;
 use syntax_pos::{self, Span};
 
 use rustc::hir;
@@ -37,6 +37,7 @@ pub struct Module {
     pub mods: Vec<Module>,
     pub id: NodeId,
     pub typedefs: Vec<Typedef>,
+    pub existentials: Vec<Existential>,
     pub statics: Vec<Static>,
     pub constants: Vec<Constant>,
     pub traits: Vec<Trait>,
@@ -44,9 +45,9 @@ pub struct Module {
     pub stab: Option<attr::Stability>,
     pub depr: Option<attr::Deprecation>,
     pub impls: Vec<Impl>,
-    pub def_traits: Vec<AutoImpl>,
     pub foreigns: Vec<hir::ForeignMod>,
     pub macros: Vec<Macro>,
+    pub proc_macros: Vec<ProcMacro>,
     pub is_crate: bool,
 }
 
@@ -55,7 +56,7 @@ impl Module {
         Module {
             name       : name,
             id: ast::CRATE_NODE_ID,
-            vis: hir::Inherited,
+            vis: Spanned { span: syntax_pos::DUMMY_SP, node: hir::VisibilityKind::Inherited },
             stab: None,
             depr: None,
             where_outer: syntax_pos::DUMMY_SP,
@@ -69,13 +70,14 @@ impl Module {
             fns        : Vec::new(),
             mods       : Vec::new(),
             typedefs   : Vec::new(),
+            existentials: Vec::new(),
             statics    : Vec::new(),
             constants  : Vec::new(),
             traits     : Vec::new(),
             impls      : Vec::new(),
-            def_traits : Vec::new(),
             foreigns   : Vec::new(),
             macros     : Vec::new(),
+            proc_macros: Vec::new(),
             is_crate   : false,
         }
     }
@@ -89,11 +91,6 @@ pub enum StructType {
     Tuple,
     /// A unit struct
     Unit,
-}
-
-pub enum TypeBound {
-    RegionBound,
-    TraitBound(hir::TraitRef)
 }
 
 pub struct Struct {
@@ -151,17 +148,26 @@ pub struct Function {
     pub vis: hir::Visibility,
     pub stab: Option<attr::Stability>,
     pub depr: Option<attr::Deprecation>,
-    pub unsafety: hir::Unsafety,
-    pub constness: hir::Constness,
+    pub header: hir::FnHeader,
     pub whence: Span,
     pub generics: hir::Generics,
-    pub abi: abi::Abi,
     pub body: hir::BodyId,
 }
 
 pub struct Typedef {
     pub ty: P<hir::Ty>,
     pub gen: hir::Generics,
+    pub name: Name,
+    pub id: ast::NodeId,
+    pub attrs: hir::HirVec<ast::Attribute>,
+    pub whence: Span,
+    pub vis: hir::Visibility,
+    pub stab: Option<attr::Stability>,
+    pub depr: Option<attr::Deprecation>,
+}
+
+pub struct Existential {
+    pub exist_ty: hir::ExistTy,
     pub name: Name,
     pub id: ast::NodeId,
     pub attrs: hir::HirVec<ast::Attribute>,
@@ -198,11 +204,12 @@ pub struct Constant {
 }
 
 pub struct Trait {
+    pub is_auto: hir::IsAuto,
     pub unsafety: hir::Unsafety,
     pub name: Name,
     pub items: hir::HirVec<hir::TraitItem>,
     pub generics: hir::Generics,
-    pub bounds: hir::HirVec<hir::TyParamBound>,
+    pub bounds: hir::HirVec<hir::GenericBound>,
     pub attrs: hir::HirVec<ast::Attribute>,
     pub id: ast::NodeId,
     pub whence: Span,
@@ -211,6 +218,7 @@ pub struct Trait {
     pub depr: Option<attr::Deprecation>,
 }
 
+#[derive(Debug)]
 pub struct Impl {
     pub unsafety: hir::Unsafety,
     pub polarity: hir::ImplPolarity,
@@ -225,14 +233,6 @@ pub struct Impl {
     pub stab: Option<attr::Stability>,
     pub depr: Option<attr::Deprecation>,
     pub id: ast::NodeId,
-}
-
-pub struct AutoImpl {
-    pub unsafety: hir::Unsafety,
-    pub trait_: hir::TraitRef,
-    pub id: ast::NodeId,
-    pub attrs: hir::HirVec<ast::Attribute>,
-    pub whence: Span,
 }
 
 // For Macro we store the DefId instead of the NodeId, since we also create
@@ -265,6 +265,17 @@ pub struct Import {
     pub path: hir::Path,
     pub glob: bool,
     pub whence: Span,
+}
+
+pub struct ProcMacro {
+    pub name: Name,
+    pub id: NodeId,
+    pub kind: MacroKind,
+    pub helpers: Vec<Name>,
+    pub attrs: hir::HirVec<ast::Attribute>,
+    pub whence: Span,
+    pub stab: Option<attr::Stability>,
+    pub depr: Option<attr::Deprecation>,
 }
 
 pub fn struct_type_from_def(vdata: &hir::VariantData) -> StructType {

@@ -10,13 +10,11 @@
 
 // error-pattern:greetings from the panic handler
 
-#![feature(panic_handler)]
-
 use std::panic;
 
 fn main() {
     panic::set_hook(Box::new(|i| {
-        eprint!("greetings from the panic handler");
+        eprintln!("greetings from the panic handler");
     }));
     panic!("foobar");
 }

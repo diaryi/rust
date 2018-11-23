@@ -28,11 +28,11 @@ fn main() {
 // START rustc.main.SimplifyCfg-qualify-consts.after.mir
 //     let mut _0: ();
 //     ...
+//     let _7: &'30_3rs bool;
+//     ...
+//     let _3: &'30_1rs bool;
+//     ...
 //     let mut _1: bool;
-//     ...
-//     let _3: &'26_1rs bool;
-//     ...
-//     let _7: &'26_3rs bool;
 //     ...
 //     let mut _2: ();
 //     let mut _4: ();
@@ -43,30 +43,38 @@ fn main() {
 //         goto -> bb1;
 //     }
 //     bb1: {
-//         _1 = const true;
-//         StorageLive(_3);
-//         _3 = &'26_1rs _1;
-//         StorageLive(_5);
-//         _5 = _1;
-//         switchInt(move _5) -> [0u8: bb3, otherwise: bb2];
+//         falseUnwind -> [real: bb2, cleanup: bb3];
 //     }
 //     bb2: {
+//         _1 = const true;
+//         StorageLive(_3);
+//         _3 = &'30_1rs _1;
+//         FakeRead(ForLet, _3);
+//         StorageLive(_5);
+//         _5 = _1;
+//         switchInt(move _5) -> [false: bb5, otherwise: bb4];
+//     }
+//     bb3: {
+//         ...
+//     }
+//     bb4: {
 //         _0 = ();
 //         StorageDead(_5);
-//         EndRegion('26_1rs);
+//         EndRegion('30_1rs);
 //         StorageDead(_3);
 //         StorageDead(_1);
 //         return;
 //     }
-//     bb3: {
+//     bb5: {
 //         _4 = ();
 //         StorageDead(_5);
 //         StorageLive(_7);
-//         _7 = &'26_3rs _1;
+//         _7 = &'30_3rs _1;
+//         FakeRead(ForLet, _7);
 //         _2 = ();
-//         EndRegion('26_3rs);
+//         EndRegion('30_3rs);
 //         StorageDead(_7);
-//         EndRegion('26_1rs);
+//         EndRegion('30_1rs);
 //         StorageDead(_3);
 //         goto -> bb1;
 //     }

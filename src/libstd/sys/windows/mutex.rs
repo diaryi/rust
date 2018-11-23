@@ -58,6 +58,8 @@ pub unsafe fn raw(m: &Mutex) -> c::PSRWLOCK {
 impl Mutex {
     pub const fn new() -> Mutex {
         Mutex {
+            // This works because SRWLOCK_INIT is 0 (wrapped in a struct), so we are also properly
+            // initializing an SRWLOCK here.
             lock: AtomicUsize::new(0),
             held: UnsafeCell::new(false),
         }
@@ -117,7 +119,7 @@ impl Mutex {
             0 => {}
             n => return n as *mut _,
         }
-        let mut re = Box::new(ReentrantMutex::uninitialized());
+        let mut re = box ReentrantMutex::uninitialized();
         re.init();
         let re = Box::into_raw(re);
         match self.lock.compare_and_swap(0, re as usize, Ordering::SeqCst) {

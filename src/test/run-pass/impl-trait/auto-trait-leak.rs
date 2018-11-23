@@ -8,7 +8,7 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-#![feature(conservative_impl_trait)]
+// run-pass
 
 // Fast path, main can see the concrete type returned.
 fn before() -> impl FnMut(i32) {

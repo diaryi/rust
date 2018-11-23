@@ -21,14 +21,16 @@ use syntax::ast::NodeId;
 // Accessibility levels, sorted in ascending order
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum AccessLevel {
+    // Superset of Reachable used to mark impl Trait items.
+    ReachableFromImplTrait,
     // Exported items + items participating in various kinds of public interfaces,
     // but not directly nameable. For example, if function `fn f() -> T {...}` is
     // public, then type `T` is reachable. Its values can be obtained by other crates
     // even if the type itself is not nameable.
     Reachable,
-    // Public items + items accessible to other crates with help of `pub use` reexports
+    // Public items + items accessible to other crates with help of `pub use` re-exports
     Exported,
-    // Items accessible to other crates directly, without help of reexports
+    // Items accessible to other crates directly, without help of re-exports
     Public,
 }
 
@@ -40,7 +42,7 @@ pub struct AccessLevels<Id = NodeId> {
 
 impl<Id: Hash + Eq> AccessLevels<Id> {
     pub fn is_reachable(&self, id: Id) -> bool {
-        self.map.contains_key(&id)
+        self.map.get(&id) >= Some(&AccessLevel::Reachable)
     }
     pub fn is_exported(&self, id: Id) -> bool {
         self.map.get(&id) >= Some(&AccessLevel::Exported)
@@ -57,7 +59,7 @@ impl<Id: Hash + Eq> Default for AccessLevels<Id> {
 }
 
 impl<Id: Hash + Eq + fmt::Debug> fmt::Debug for AccessLevels<Id> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Debug::fmt(&self.map, f)
     }
 }

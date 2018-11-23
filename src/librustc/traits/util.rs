@@ -9,7 +9,7 @@
 // except according to those terms.
 
 use hir::def_id::DefId;
-use ty::subst::{Subst, Substs};
+use ty::subst::{Kind, Subst, Substs};
 use ty::{self, Ty, TyCtxt, ToPredicate, ToPolyTraitRef};
 use ty::outlives::Component;
 use util::nodemap::FxHashSet;
@@ -24,9 +24,6 @@ fn anonymize_predicate<'a, 'gcx, 'tcx>(tcx: TyCtxt<'a, 'gcx, 'tcx>,
     match *pred {
         ty::Predicate::Trait(ref data) =>
             ty::Predicate::Trait(tcx.anonymize_late_bound_regions(data)),
-
-        ty::Predicate::Equate(ref data) =>
-            ty::Predicate::Equate(tcx.anonymize_late_bound_regions(data)),
 
         ty::Predicate::RegionOutlives(ref data) =>
             ty::Predicate::RegionOutlives(tcx.anonymize_late_bound_regions(data)),
@@ -62,7 +59,7 @@ struct PredicateSet<'a, 'gcx: 'a+'tcx, 'tcx: 'a> {
 
 impl<'a, 'gcx, 'tcx> PredicateSet<'a, 'gcx, 'tcx> {
     fn new(tcx: TyCtxt<'a, 'gcx, 'tcx>) -> PredicateSet<'a, 'gcx, 'tcx> {
-        PredicateSet { tcx: tcx, set: FxHashSet() }
+        PredicateSet { tcx: tcx, set: Default::default() }
     }
 
     fn insert(&mut self, pred: &ty::Predicate<'tcx>) -> bool {
@@ -106,11 +103,10 @@ pub fn elaborate_trait_ref<'cx, 'gcx, 'tcx>(
 
 pub fn elaborate_trait_refs<'cx, 'gcx, 'tcx>(
     tcx: TyCtxt<'cx, 'gcx, 'tcx>,
-    trait_refs: &[ty::PolyTraitRef<'tcx>])
+    trait_refs: impl Iterator<Item = ty::PolyTraitRef<'tcx>>)
     -> Elaborator<'cx, 'gcx, 'tcx>
 {
-    let predicates = trait_refs.iter()
-                               .map(|trait_ref| trait_ref.to_predicate())
+    let predicates = trait_refs.map(|trait_ref| trait_ref.to_predicate())
                                .collect();
     elaborate_predicates(tcx, predicates)
 }
@@ -140,7 +136,7 @@ impl<'cx, 'gcx, 'tcx> Elaborator<'cx, 'gcx, 'tcx> {
                 let mut predicates: Vec<_> =
                     predicates.predicates
                               .iter()
-                              .map(|p| p.subst_supertrait(tcx, &data.to_poly_trait_ref()))
+                              .map(|(p, _)| p.subst_supertrait(tcx, &data.to_poly_trait_ref()))
                               .collect();
 
                 debug!("super_predicates: data={:?} predicates={:?}",
@@ -162,11 +158,6 @@ impl<'cx, 'gcx, 'tcx> Elaborator<'cx, 'gcx, 'tcx> {
             ty::Predicate::ObjectSafe(..) => {
                 // Currently, we do not elaborate object-safe
                 // predicates.
-            }
-            ty::Predicate::Equate(..) => {
-                // Currently, we do not "elaborate" predicates like
-                // `X == Y`, though conceivably we might. For example,
-                // `&X == &Y` implies that `X == Y`.
             }
             ty::Predicate::Subtype(..) => {
                 // Currently, we do not "elaborate" predicates like `X
@@ -209,21 +200,23 @@ impl<'cx, 'gcx, 'tcx> Elaborator<'cx, 'gcx, 'tcx> {
                 }
 
                 let visited = &mut self.visited;
+                let mut components = smallvec![];
+                tcx.push_outlives_components(ty_max, &mut components);
                 self.stack.extend(
-                    tcx.outlives_components(ty_max)
+                    components
                        .into_iter()
                        .filter_map(|component| match component {
                            Component::Region(r) => if r.is_late_bound() {
                                None
                            } else {
                                Some(ty::Predicate::RegionOutlives(
-                                   ty::Binder(ty::OutlivesPredicate(r, r_min))))
+                                   ty::Binder::dummy(ty::OutlivesPredicate(r, r_min))))
                            },
 
                            Component::Param(p) => {
-                               let ty = tcx.mk_param(p.idx, p.name);
+                               let ty = tcx.mk_ty_param(p.idx, p.name);
                                Some(ty::Predicate::TypeOutlives(
-                                   ty::Binder(ty::OutlivesPredicate(ty, r_min))))
+                                   ty::Binder::dummy(ty::OutlivesPredicate(ty, r_min))))
                            },
 
                            Component::UnresolvedInferenceVariable(_) => {
@@ -246,6 +239,10 @@ impl<'cx, 'gcx, 'tcx> Elaborator<'cx, 'gcx, 'tcx> {
 
 impl<'cx, 'gcx, 'tcx> Iterator for Elaborator<'cx, 'gcx, 'tcx> {
     type Item = ty::Predicate<'tcx>;
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.stack.len(), None)
+    }
 
     fn next(&mut self) -> Option<ty::Predicate<'tcx>> {
         // Extract next item from top-most stack frame, if any.
@@ -275,7 +272,7 @@ pub fn supertraits<'cx, 'gcx, 'tcx>(tcx: TyCtxt<'cx, 'gcx, 'tcx>,
 }
 
 pub fn transitive_bounds<'cx, 'gcx, 'tcx>(tcx: TyCtxt<'cx, 'gcx, 'tcx>,
-                                          bounds: &[ty::PolyTraitRef<'tcx>])
+                                          bounds: impl Iterator<Item = ty::PolyTraitRef<'tcx>>)
                                           -> Supertraits<'cx, 'gcx, 'tcx>
 {
     elaborate_trait_refs(tcx, bounds).filter_to_traits()
@@ -315,7 +312,7 @@ impl<'cx, 'gcx, 'tcx> Iterator for SupertraitDefIds<'cx, 'gcx, 'tcx> {
         self.stack.extend(
             predicates.predicates
                       .iter()
-                      .filter_map(|p| p.to_opt_poly_trait_ref())
+                      .filter_map(|(p, _)| p.to_opt_poly_trait_ref())
                       .map(|t| t.def_id())
                       .filter(|&super_def_id| visited.insert(super_def_id)));
         Some(def_id)
@@ -338,7 +335,7 @@ impl<I> FilterToTraits<I> {
     }
 }
 
-impl<'tcx,I:Iterator<Item=ty::Predicate<'tcx>>> Iterator for FilterToTraits<I> {
+impl<'tcx, I: Iterator<Item = ty::Predicate<'tcx>>> Iterator for FilterToTraits<I> {
     type Item = ty::PolyTraitRef<'tcx>;
 
     fn next(&mut self) -> Option<ty::PolyTraitRef<'tcx>> {
@@ -350,10 +347,14 @@ impl<'tcx,I:Iterator<Item=ty::Predicate<'tcx>>> Iterator for FilterToTraits<I> {
                 Some(ty::Predicate::Trait(data)) => {
                     return Some(data.to_poly_trait_ref());
                 }
-                Some(_) => {
-                }
+                Some(_) => {}
             }
         }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let (_, upper) = self.base_iterator.size_hint();
+        (0, upper)
     }
 }
 
@@ -433,13 +434,13 @@ impl<'a, 'gcx, 'tcx> TyCtxt<'a, 'gcx, 'tcx> {
                                    cause: ObligationCause<'tcx>,
                                    trait_def_id: DefId,
                                    recursion_depth: usize,
-                                   param_ty: Ty<'tcx>,
-                                   ty_params: &[Ty<'tcx>])
+                                   self_ty: Ty<'tcx>,
+                                   params: &[Kind<'tcx>])
         -> PredicateObligation<'tcx>
     {
         let trait_ref = ty::TraitRef {
             def_id: trait_def_id,
-            substs: self.mk_substs_trait(param_ty, ty_params)
+            substs: self.mk_substs_trait(self_ty, params)
         };
         predicate_for_trait_ref(cause, param_env, trait_ref, recursion_depth)
     }
@@ -511,13 +512,13 @@ impl<'a, 'gcx, 'tcx> TyCtxt<'a, 'gcx, 'tcx> {
         let arguments_tuple = match tuple_arguments {
             TupleArgumentsFlag::No => sig.skip_binder().inputs()[0],
             TupleArgumentsFlag::Yes =>
-                self.intern_tup(sig.skip_binder().inputs(), false),
+                self.intern_tup(sig.skip_binder().inputs()),
         };
         let trait_ref = ty::TraitRef {
             def_id: fn_trait_def_id,
-            substs: self.mk_substs_trait(self_ty, &[arguments_tuple]),
+            substs: self.mk_substs_trait(self_ty, &[arguments_tuple.into()]),
         };
-        ty::Binder((trait_ref, sig.skip_binder().output()))
+        ty::Binder::bind((trait_ref, sig.skip_binder().output()))
     }
 
     pub fn generator_trait_ref_and_outputs(self,
@@ -530,14 +531,14 @@ impl<'a, 'gcx, 'tcx> TyCtxt<'a, 'gcx, 'tcx> {
             def_id: fn_trait_def_id,
             substs: self.mk_substs_trait(self_ty, &[]),
         };
-        ty::Binder((trait_ref, sig.skip_binder().yield_ty, sig.skip_binder().return_ty))
+        ty::Binder::bind((trait_ref, sig.skip_binder().yield_ty, sig.skip_binder().return_ty))
     }
 
     pub fn impl_is_default(self, node_item_def_id: DefId) -> bool {
         match self.hir.as_local_node_id(node_item_def_id) {
             Some(node_id) => {
                 let item = self.hir.expect_item(node_id);
-                if let hir::ItemImpl(_, _, defaultness, ..) = item.node {
+                if let hir::ItemKind::Impl(_, _, defaultness, ..) = item.node {
                     defaultness.is_default()
                 } else {
                     false

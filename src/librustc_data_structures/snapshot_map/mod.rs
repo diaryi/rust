@@ -23,6 +23,18 @@ pub struct SnapshotMap<K, V>
     undo_log: Vec<UndoLog<K, V>>,
 }
 
+// HACK(eddyb) manual impl avoids `Default` bounds on `K` and `V`.
+impl<K, V> Default for SnapshotMap<K, V>
+    where K: Hash + Clone + Eq
+{
+    fn default() -> Self {
+        SnapshotMap {
+            map: Default::default(),
+            undo_log: Default::default(),
+        }
+    }
+}
+
 pub struct Snapshot {
     len: usize,
 }
@@ -38,11 +50,9 @@ enum UndoLog<K, V> {
 impl<K, V> SnapshotMap<K, V>
     where K: Hash + Clone + Eq
 {
-    pub fn new() -> Self {
-        SnapshotMap {
-            map: FxHashMap(),
-            undo_log: vec![],
-        }
+    pub fn clear(&mut self) {
+        self.map.clear();
+        self.undo_log.clear();
     }
 
     pub fn insert(&mut self, key: K, value: V) -> bool {
@@ -59,6 +69,12 @@ impl<K, V> SnapshotMap<K, V>
                 }
                 false
             }
+        }
+    }
+
+    pub fn insert_noop(&mut self) {
+        if !self.undo_log.is_empty() {
+            self.undo_log.push(UndoLog::Noop);
         }
     }
 
@@ -81,7 +97,7 @@ impl<K, V> SnapshotMap<K, V>
     pub fn snapshot(&mut self) -> Snapshot {
         self.undo_log.push(UndoLog::OpenSnapshot);
         let len = self.undo_log.len() - 1;
-        Snapshot { len: len }
+        Snapshot { len }
     }
 
     fn assert_open_snapshot(&self, snapshot: &Snapshot) {
@@ -92,8 +108,8 @@ impl<K, V> SnapshotMap<K, V>
         });
     }
 
-    pub fn commit(&mut self, snapshot: Snapshot) {
-        self.assert_open_snapshot(&snapshot);
+    pub fn commit(&mut self, snapshot: &Snapshot) {
+        self.assert_open_snapshot(snapshot);
         if snapshot.len == 0 {
             // The root snapshot.
             self.undo_log.truncate(0);
@@ -124,8 +140,8 @@ impl<K, V> SnapshotMap<K, V>
         }
     }
 
-    pub fn rollback_to(&mut self, snapshot: Snapshot) {
-        self.assert_open_snapshot(&snapshot);
+    pub fn rollback_to(&mut self, snapshot: &Snapshot) {
+        self.assert_open_snapshot(snapshot);
         while self.undo_log.len() > snapshot.len + 1 {
             let entry = self.undo_log.pop().unwrap();
             self.reverse(entry);

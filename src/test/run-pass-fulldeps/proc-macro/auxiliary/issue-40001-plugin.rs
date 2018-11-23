@@ -7,8 +7,9 @@
 // <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
+
 #![feature(box_syntax, plugin, plugin_registrar, rustc_private)]
-#![feature(macro_vis_matcher)]
+#![feature(macro_at_most_once_rep)]
 #![crate_type = "dylib"]
 
 #[macro_use]
@@ -17,6 +18,7 @@ extern crate rustc_plugin;
 extern crate syntax;
 
 use rustc_plugin::Registry;
+use syntax::attr;
 use syntax::ext::base::*;
 use syntax::feature_gate::AttributeType::Whitelisted;
 use syntax::symbol::Symbol;
@@ -24,9 +26,10 @@ use syntax::symbol::Symbol;
 use rustc::hir;
 use rustc::hir::intravisit;
 use rustc::hir::map as hir_map;
+use hir::Node;
 use rustc::lint::{LateContext, LintPass, LintArray, LateLintPass, LintContext};
 use rustc::ty;
-use syntax::{ast, codemap};
+use syntax::{ast, source_map};
 
 #[plugin_registrar]
 pub fn plugin_registrar(reg: &mut Registry) {
@@ -51,17 +54,17 @@ impl<'a, 'tcx> LateLintPass<'a, 'tcx> for MissingWhitelistedAttrPass {
                 _: intravisit::FnKind<'tcx>,
                 _: &'tcx hir::FnDecl,
                 _: &'tcx hir::Body,
-                span: codemap::Span,
+                span: source_map::Span,
                 id: ast::NodeId) {
 
         let item = match cx.tcx.hir.get(id) {
-            hir_map::Node::NodeItem(item) => item,
+            Node::Item(item) => item,
             _ => cx.tcx.hir.expect_item(cx.tcx.hir.get_parent(id)),
         };
 
-        if !item.attrs.iter().any(|a| a.check_name("whitelisted_attr")) {
+        if !attr::contains_name(&item.attrs, "whitelisted_attr") {
             cx.span_lint(MISSING_WHITELISTED_ATTR, span,
-                         "Missing 'whitelited_attr' attribute");
+                         "Missing 'whitelisted_attr' attribute");
         }
     }
 }

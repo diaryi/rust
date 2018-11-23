@@ -236,7 +236,7 @@ enum State {
 impl<'a> AsyncPipe<'a> {
     fn new(pipe: Handle, dst: &'a mut Vec<u8>) -> io::Result<AsyncPipe<'a>> {
         // Create an event which we'll use to coordinate our overlapped
-        // opreations, this event will be used in WaitForMultipleObjects
+        // operations, this event will be used in WaitForMultipleObjects
         // and passed as part of the OVERLAPPED handle.
         //
         // Note that we do a somewhat clever thing here by flagging the
@@ -359,6 +359,6 @@ unsafe fn slice_to_end(v: &mut Vec<u8>) -> &mut [u8] {
     if v.capacity() == v.len() {
         v.reserve(1);
     }
-    slice::from_raw_parts_mut(v.as_mut_ptr().offset(v.len() as isize),
+    slice::from_raw_parts_mut(v.as_mut_ptr().add(v.len()),
                               v.capacity() - v.len())
 }

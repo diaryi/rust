@@ -23,7 +23,7 @@
 //! testing a value against a constant.
 
 use build::{BlockAnd, BlockAndExtension, Builder};
-use build::matches::{Binding, MatchPair, Candidate};
+use build::matches::{Ascription, Binding, MatchPair, Candidate};
 use hair::*;
 use rustc::mir::*;
 
@@ -63,6 +63,18 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
                                  candidate: &mut Candidate<'pat, 'tcx>)
                                  -> Result<(), MatchPair<'pat, 'tcx>> {
         match *match_pair.pattern.kind {
+            PatternKind::AscribeUserType { ref subpattern, ref user_ty, user_ty_span } => {
+                candidate.ascriptions.push(Ascription {
+                    span: user_ty_span,
+                    user_ty: user_ty.clone(),
+                    source: match_pair.place.clone(),
+                });
+
+                candidate.match_pairs.push(MatchPair::new(match_pair.place, subpattern));
+
+                Ok(())
+            }
+
             PatternKind::Wild => {
                 // nothing left to do
                 Ok(())
@@ -92,15 +104,29 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
                 Err(match_pair)
             }
 
-            PatternKind::Range { .. } |
-            PatternKind::Slice { .. } => {
+            PatternKind::Range { .. } => {
                 Err(match_pair)
             }
 
+            PatternKind::Slice { ref prefix, ref slice, ref suffix } => {
+                if prefix.is_empty() && slice.is_some() && suffix.is_empty() {
+                    // irrefutable
+                    self.prefix_slice_suffix(&mut candidate.match_pairs,
+                                             &match_pair.place,
+                                             prefix,
+                                             slice.as_ref(),
+                                             suffix);
+                    Ok(())
+                } else {
+                    Err(match_pair)
+                }
+            }
+
             PatternKind::Variant { adt_def, substs, variant_index, ref subpatterns } => {
-                let irrefutable = adt_def.variants.iter().enumerate().all(|(i, v)| {
+                let irrefutable = adt_def.variants.iter_enumerated().all(|(i, v)| {
                     i == variant_index || {
-                        self.hir.tcx().sess.features.borrow().never_type &&
+                        self.hir.tcx().features().never_type &&
+                        self.hir.tcx().features().exhaustive_patterns &&
                         self.hir.tcx().is_variant_uninhabited_from_all_modules(v, substs)
                     }
                 });

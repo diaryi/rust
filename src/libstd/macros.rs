@@ -16,7 +16,7 @@
 
 /// The entry point for panic of Rust threads.
 ///
-/// This allows a program to to terminate immediately and provide feedback
+/// This allows a program to terminate immediately and provide feedback
 /// to the caller of the program. `panic!` should be used when a program reaches
 /// an unrecoverable problem.
 ///
@@ -32,17 +32,20 @@
 ///
 /// [`Result`] enum is often a better solution for recovering from errors than
 /// using the `panic!` macro.  This macro should be used to avoid proceeding using
-/// incorrect values, such as from external sources.  Detailed information about
+/// incorrect values, such as from external sources. Detailed information about
 /// error handling is found in the [book].
 ///
 /// The multi-argument form of this macro panics with a string and has the
 /// [`format!`] syntax for building a string.
 ///
+/// See also the macro [`compile_error!`], for raising errors during compilation.
+///
 /// [runwrap]: ../std/result/enum.Result.html#method.unwrap
 /// [`Option`]: ../std/option/enum.Option.html#method.unwrap
 /// [`Result`]: ../std/result/enum.Result.html
 /// [`format!`]: ../std/macro.format.html
-/// [book]: ../book/second-edition/ch09-01-unrecoverable-errors-with-panic.html
+/// [`compile_error!`]: ../std/macro.compile_error.html
+/// [book]: ../book/ch09-00-error-handling.html
 ///
 /// # Current implementation
 ///
@@ -67,6 +70,9 @@ macro_rules! panic {
     });
     ($msg:expr) => ({
         $crate::rt::begin_panic($msg, &(file!(), line!(), __rust_unstable_column!()))
+    });
+    ($msg:expr,) => ({
+        panic!($msg)
     });
     ($fmt:expr, $($arg:tt)+) => ({
         $crate::rt::begin_panic_fmt(&format_args!($fmt, $($arg)+),
@@ -133,7 +139,7 @@ macro_rules! print {
 ///
 /// [`format!`]: ../std/macro.format.html
 /// [`std::fmt`]: ../std/fmt/index.html
-/// [`eprintln!`]: ../std/macro.eprint.html
+/// [`eprintln!`]: ../std/macro.eprintln.html
 /// # Panics
 ///
 /// Panics if writing to `io::stdout` fails.
@@ -147,10 +153,12 @@ macro_rules! print {
 /// ```
 #[macro_export]
 #[stable(feature = "rust1", since = "1.0.0")]
+#[allow_internal_unstable]
 macro_rules! println {
     () => (print!("\n"));
-    ($fmt:expr) => (print!(concat!($fmt, "\n")));
-    ($fmt:expr, $($arg:tt)*) => (print!(concat!($fmt, "\n"), $($arg)*));
+    ($($arg:tt)*) => ({
+        $crate::io::_print(format_args_nl!($($arg)*));
+    })
 }
 
 /// Macro for printing to the standard error.
@@ -204,10 +212,154 @@ macro_rules! eprint {
 /// ```
 #[macro_export]
 #[stable(feature = "eprint", since = "1.19.0")]
+#[allow_internal_unstable]
 macro_rules! eprintln {
     () => (eprint!("\n"));
-    ($fmt:expr) => (eprint!(concat!($fmt, "\n")));
-    ($fmt:expr, $($arg:tt)*) => (eprint!(concat!($fmt, "\n"), $($arg)*));
+    ($($arg:tt)*) => ({
+        $crate::io::_eprint(format_args_nl!($($arg)*));
+    })
+}
+
+/// A macro for quick and dirty debugging with which you can inspect
+/// the value of a given expression. An example:
+///
+/// ```rust
+/// #![feature(dbg_macro)]
+///
+/// let a = 2;
+/// let b = dbg!(a * 2) + 1;
+/// //      ^-- prints: [src/main.rs:4] a * 2 = 4
+/// assert_eq!(b, 5);
+/// ```
+///
+/// The macro works by using the `Debug` implementation of the type of
+/// the given expression to print the value to [stderr] along with the
+/// source location of the macro invocation as well as the source code
+/// of the expression.
+///
+/// Invoking the macro on an expression moves and takes ownership of it
+/// before returning the evaluated expression unchanged. If the type
+/// of the expression does not implement `Copy` and you don't want
+/// to give up ownership, you can instead borrow with `dbg!(&expr)`
+/// for some expression `expr`.
+///
+/// Note that the macro is intended as a debugging tool and therefore you
+/// should avoid having uses of it in version control for longer periods.
+/// Use cases involving debug output that should be added to version control
+/// may be better served by macros such as `debug!` from the `log` crate.
+///
+/// # Stability
+///
+/// The exact output printed by this macro should not be relied upon
+/// and is subject to future changes.
+///
+/// # Panics
+///
+/// Panics if writing to `io::stderr` fails.
+///
+/// # Further examples
+///
+/// With a method call:
+///
+/// ```rust
+/// #![feature(dbg_macro)]
+///
+/// fn foo(n: usize) {
+///     if let Some(_) = dbg!(n.checked_sub(4)) {
+///         // ...
+///     }
+/// }
+///
+/// foo(3)
+/// ```
+///
+/// This prints to [stderr]:
+///
+/// ```text,ignore
+/// [src/main.rs:4] n.checked_sub(4) = None
+/// ```
+///
+/// Naive factorial implementation:
+///
+/// ```rust
+/// #![feature(dbg_macro)]
+///
+/// fn factorial(n: u32) -> u32 {
+///     if dbg!(n <= 1) {
+///         dbg!(1)
+///     } else {
+///         dbg!(n * factorial(n - 1))
+///     }
+/// }
+///
+/// dbg!(factorial(4));
+/// ```
+///
+/// This prints to [stderr]:
+///
+/// ```text,ignore
+/// [src/main.rs:3] n <= 1 = false
+/// [src/main.rs:3] n <= 1 = false
+/// [src/main.rs:3] n <= 1 = false
+/// [src/main.rs:3] n <= 1 = true
+/// [src/main.rs:4] 1 = 1
+/// [src/main.rs:5] n * factorial(n - 1) = 2
+/// [src/main.rs:5] n * factorial(n - 1) = 6
+/// [src/main.rs:5] n * factorial(n - 1) = 24
+/// [src/main.rs:11] factorial(4) = 24
+/// ```
+///
+/// The `dbg!(..)` macro moves the input:
+///
+/// ```compile_fail
+/// #![feature(dbg_macro)]
+///
+/// /// A wrapper around `usize` which importantly is not Copyable.
+/// #[derive(Debug)]
+/// struct NoCopy(usize);
+///
+/// let a = NoCopy(42);
+/// let _ = dbg!(a); // <-- `a` is moved here.
+/// let _ = dbg!(a); // <-- `a` is moved again; error!
+/// ```
+///
+/// [stderr]: https://en.wikipedia.org/wiki/Standard_streams#Standard_error_(stderr)
+#[macro_export]
+#[unstable(feature = "dbg_macro", issue = "54306")]
+macro_rules! dbg {
+    ($val:expr) => {
+        // Use of `match` here is intentional because it affects the lifetimes
+        // of temporaries - https://stackoverflow.com/a/48732525/1063961
+        match $val {
+            tmp => {
+                eprintln!("[{}:{}] {} = {:#?}",
+                    file!(), line!(), stringify!($val), &tmp);
+                tmp
+            }
+        }
+    }
+}
+
+#[macro_export]
+#[unstable(feature = "await_macro", issue = "50547")]
+#[allow_internal_unstable]
+#[allow_internal_unsafe]
+macro_rules! await {
+    ($e:expr) => { {
+        let mut pinned = $e;
+        loop {
+            if let $crate::task::Poll::Ready(x) =
+                $crate::future::poll_with_tls_waker(unsafe {
+                    $crate::pin::Pin::new_unchecked(&mut pinned)
+                })
+            {
+                break x;
+            }
+            // FIXME(cramertj) prior to stabilizing await, we have to ensure that this
+            // can't be used to create a generator on stable via `|| await!()`.
+            yield
+        }
+    } }
 }
 
 /// A macro to select an event from a number of receivers.
@@ -247,6 +399,8 @@ macro_rules! eprintln {
 /// For more information about select, see the `std::sync::mpsc::Select` structure.
 #[macro_export]
 #[unstable(feature = "mpsc_select", issue = "27800")]
+#[rustc_deprecated(since = "1.32.0",
+                   reason = "channel selection will be removed in a future release")]
 macro_rules! select {
     (
         $($name:pat = $rx:ident.$meth:ident() => $code:expr),+
@@ -277,19 +431,22 @@ macro_rules! assert_approx_eq {
 /// These macros do not have any corresponding definition with a `macro_rules!`
 /// macro, but are documented here. Their implementations can be found hardcoded
 /// into libsyntax itself.
-#[cfg(dox)]
-pub mod builtin {
+#[cfg(rustdoc)]
+mod builtin {
 
     /// Unconditionally causes compilation to fail with the given error message when encountered.
     ///
     /// This macro should be used when a crate uses a conditional compilation strategy to provide
-    /// better error messages for errornous conditions.
+    /// better error messages for erroneous conditions. It's the compiler-level form of [`panic!`],
+    /// which emits an error at *runtime*, rather than during compilation.
     ///
     /// # Examples
     ///
     /// Two such examples are macros and `#[cfg]` environments.
     ///
-    /// Emit better compiler error if a macro is passed invalid values.
+    /// Emit better compiler error if a macro is passed invalid values. Without the final branch,
+    /// the compiler would still emit an error, but the error's message would not mention the two
+    /// valid values.
     ///
     /// ```compile_fail
     /// macro_rules! give_me_foo_or_bar {
@@ -310,9 +467,14 @@ pub mod builtin {
     /// #[cfg(not(any(feature = "foo", feature = "bar")))]
     /// compile_error!("Either feature \"foo\" or \"bar\" must be enabled for this crate.")
     /// ```
+    ///
+    /// [`panic!`]: ../std/macro.panic.html
     #[stable(feature = "compile_error_macro", since = "1.20.0")]
-    #[macro_export]
-    macro_rules! compile_error { ($msg:expr) => ({ /* compiler built-in */ }) }
+    #[rustc_doc_only_macro]
+    macro_rules! compile_error {
+        ($msg:expr) => ({ /* compiler built-in */ });
+        ($msg:expr,) => ({ /* compiler built-in */ });
+    }
 
     /// The core macro for formatted string creation & output.
     ///
@@ -328,6 +490,18 @@ pub mod builtin {
     /// All other formatting macros ([`format!`], [`write!`], [`println!`], etc) are
     /// proxied through this one.  `format_args!`, unlike its derived macros, avoids
     /// heap allocations.
+    ///
+    /// You can use the [`fmt::Arguments`] value that `format_args!` returns
+    /// in `Debug` and `Display` contexts as seen below. The example also shows
+    /// that `Debug` and `Display` format to the same thing: the interpolated
+    /// format string in `format_args!`.
+    ///
+    /// ```rust
+    /// let debug = format!("{:?}", format_args!("{} foo {:?}", 1, 2));
+    /// let display = format!("{}", format_args!("{} foo {:?}", 1, 2));
+    /// assert_eq!("1 foo 2", display);
+    /// assert_eq!(display, debug);
+    /// ```
     ///
     /// For more information, see the documentation in [`std::fmt`].
     ///
@@ -346,10 +520,9 @@ pub mod builtin {
     ///
     /// let s = fmt::format(format_args!("hello {}", "world"));
     /// assert_eq!(s, format!("hello {}", "world"));
-    ///
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
-    #[macro_export]
+    #[rustc_doc_only_macro]
     macro_rules! format_args {
         ($fmt:expr) => ({ /* compiler built-in */ });
         ($fmt:expr, $($args:tt)*) => ({ /* compiler built-in */ });
@@ -361,7 +534,7 @@ pub mod builtin {
     /// compile time, yielding an expression of type `&'static str`.
     ///
     /// If the environment variable is not defined, then a compilation error
-    /// will be emitted.  To not emit a compile error, use the [`option_env!`]
+    /// will be emitted. To not emit a compile error, use the [`option_env!`]
     /// macro instead.
     ///
     /// [`option_env!`]: ../std/macro.option_env.html
@@ -372,8 +545,22 @@ pub mod builtin {
     /// let path: &'static str = env!("PATH");
     /// println!("the $PATH variable at the time of compiling was: {}", path);
     /// ```
+    ///
+    /// You can customize the error message by passing a string as the second
+    /// parameter:
+    ///
+    /// ```compile_fail
+    /// let doc: &'static str = env!("documentation", "what's that?!");
+    /// ```
+    ///
+    /// If the `documentation` environment variable is not defined, you'll get
+    /// the following error:
+    ///
+    /// ```text
+    /// error: what's that?!
+    /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
-    #[macro_export]
+    #[rustc_doc_only_macro]
     macro_rules! env {
         ($name:expr) => ({ /* compiler built-in */ });
         ($name:expr,) => ({ /* compiler built-in */ });
@@ -399,8 +586,11 @@ pub mod builtin {
     /// println!("the secret key might be: {:?}", key);
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
-    #[macro_export]
-    macro_rules! option_env { ($name:expr) => ({ /* compiler built-in */ }) }
+    #[rustc_doc_only_macro]
+    macro_rules! option_env {
+        ($name:expr) => ({ /* compiler built-in */ });
+        ($name:expr,) => ({ /* compiler built-in */ });
+    }
 
     /// Concatenate identifiers into one identifier.
     ///
@@ -427,10 +617,10 @@ pub mod builtin {
     /// # }
     /// ```
     #[unstable(feature = "concat_idents_macro", issue = "29599")]
-    #[macro_export]
+    #[rustc_doc_only_macro]
     macro_rules! concat_idents {
-        ($($e:ident),*) => ({ /* compiler built-in */ });
-        ($($e:ident,)*) => ({ /* compiler built-in */ });
+        ($($e:ident),+) => ({ /* compiler built-in */ });
+        ($($e:ident,)+) => ({ /* compiler built-in */ });
     }
 
     /// Concatenates literals into a static string slice.
@@ -449,7 +639,7 @@ pub mod builtin {
     /// assert_eq!(s, "test10btrue");
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
-    #[macro_export]
+    #[rustc_doc_only_macro]
     macro_rules! concat {
         ($($e:expr),*) => ({ /* compiler built-in */ });
         ($($e:expr,)*) => ({ /* compiler built-in */ });
@@ -460,9 +650,12 @@ pub mod builtin {
     /// With [`column!`] and [`file!`], these macros provide debugging information for
     /// developers about the location within the source.
     ///
-    /// The expanded expression has type `u32`, and the returned line is not
-    /// the invocation of the `line!()` macro itself, but rather the first macro
-    /// invocation leading up to the invocation of the `line!()` macro.
+    /// The expanded expression has type `u32` and is 1-based, so the first line
+    /// in each file evaluates to 1, the second to 2, etc. This is consistent
+    /// with error messages by common compilers or popular editors.
+    /// The returned line is *not necessarily* the line of the `line!` invocation itself,
+    /// but rather the first macro invocation leading up to the invocation
+    /// of the `line!` macro.
     ///
     /// [`column!`]: macro.column.html
     /// [`file!`]: macro.file.html
@@ -474,7 +667,7 @@ pub mod builtin {
     /// println!("defined on line: {}", current_line);
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
-    #[macro_export]
+    #[rustc_doc_only_macro]
     macro_rules! line { () => ({ /* compiler built-in */ }) }
 
     /// A macro which expands to the column number on which it was invoked.
@@ -482,9 +675,12 @@ pub mod builtin {
     /// With [`line!`] and [`file!`], these macros provide debugging information for
     /// developers about the location within the source.
     ///
-    /// The expanded expression has type `u32`, and the returned column is not
-    /// the invocation of the `column!` macro itself, but rather the first macro
-    /// invocation leading up to the invocation of the `column!` macro.
+    /// The expanded expression has type `u32` and is 1-based, so the first column
+    /// in each line evaluates to 1, the second to 2, etc. This is consistent
+    /// with error messages by common compilers or popular editors.
+    /// The returned column is *not necessarily* the line of the `column!` invocation itself,
+    /// but rather the first macro invocation leading up to the invocation
+    /// of the `column!` macro.
     ///
     /// [`line!`]: macro.line.html
     /// [`file!`]: macro.file.html
@@ -496,7 +692,7 @@ pub mod builtin {
     /// println!("defined on column: {}", current_col);
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
-    #[macro_export]
+    #[rustc_doc_only_macro]
     macro_rules! column { () => ({ /* compiler built-in */ }) }
 
     /// A macro which expands to the file name from which it was invoked.
@@ -520,7 +716,7 @@ pub mod builtin {
     /// println!("defined in file: {}", this_file);
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
-    #[macro_export]
+    #[rustc_doc_only_macro]
     macro_rules! file { () => ({ /* compiler built-in */ }) }
 
     /// A macro which stringifies its arguments.
@@ -539,7 +735,7 @@ pub mod builtin {
     /// assert_eq!(one_plus_one, "1 + 1");
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
-    #[macro_export]
+    #[rustc_doc_only_macro]
     macro_rules! stringify { ($($t:tt)*) => ({ /* compiler built-in */ }) }
 
     /// Includes a utf8-encoded file as a string.
@@ -573,8 +769,11 @@ pub mod builtin {
     ///
     /// Compiling 'main.rs' and running the resulting binary will print "adiós".
     #[stable(feature = "rust1", since = "1.0.0")]
-    #[macro_export]
-    macro_rules! include_str { ($file:expr) => ({ /* compiler built-in */ }) }
+    #[rustc_doc_only_macro]
+    macro_rules! include_str {
+        ($file:expr) => ({ /* compiler built-in */ });
+        ($file:expr,) => ({ /* compiler built-in */ });
+    }
 
     /// Includes a file as a reference to a byte array.
     ///
@@ -607,8 +806,11 @@ pub mod builtin {
     ///
     /// Compiling 'main.rs' and running the resulting binary will print "adiós".
     #[stable(feature = "rust1", since = "1.0.0")]
-    #[macro_export]
-    macro_rules! include_bytes { ($file:expr) => ({ /* compiler built-in */ }) }
+    #[rustc_doc_only_macro]
+    macro_rules! include_bytes {
+        ($file:expr) => ({ /* compiler built-in */ });
+        ($file:expr,) => ({ /* compiler built-in */ });
+    }
 
     /// Expands to a string that represents the current module path.
     ///
@@ -628,7 +830,7 @@ pub mod builtin {
     /// test::foo();
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
-    #[macro_export]
+    #[rustc_doc_only_macro]
     macro_rules! module_path { () => ({ /* compiler built-in */ }) }
 
     /// Boolean evaluation of configuration flags, at compile-time.
@@ -637,8 +839,8 @@ pub mod builtin {
     /// boolean expression evaluation of configuration flags. This frequently
     /// leads to less duplicated code.
     ///
-    /// The syntax given to this macro is the same syntax as [the `cfg`
-    /// attribute](../book/first-edition/conditional-compilation.html).
+    /// The syntax given to this macro is the same syntax as the `cfg`
+    /// attribute.
     ///
     /// # Examples
     ///
@@ -650,7 +852,7 @@ pub mod builtin {
     /// };
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
-    #[macro_export]
+    #[rustc_doc_only_macro]
     macro_rules! cfg { ($($cfg:tt)*) => ({ /* compiler built-in */ }) }
 
     /// Parse a file as an expression or an item according to the context.
@@ -693,17 +895,73 @@ pub mod builtin {
     /// Compiling 'main.rs' and running the resulting binary will print
     /// "🙈🙊🙉🙈🙊🙉".
     #[stable(feature = "rust1", since = "1.0.0")]
-    #[macro_export]
-    macro_rules! include { ($file:expr) => ({ /* compiler built-in */ }) }
+    #[rustc_doc_only_macro]
+    macro_rules! include {
+        ($file:expr) => ({ /* compiler built-in */ });
+        ($file:expr,) => ({ /* compiler built-in */ });
+    }
+
+    /// Ensure that a boolean expression is `true` at runtime.
+    ///
+    /// This will invoke the [`panic!`] macro if the provided expression cannot be
+    /// evaluated to `true` at runtime.
+    ///
+    /// # Uses
+    ///
+    /// Assertions are always checked in both debug and release builds, and cannot
+    /// be disabled. See [`debug_assert!`] for assertions that are not enabled in
+    /// release builds by default.
+    ///
+    /// Unsafe code relies on `assert!` to enforce run-time invariants that, if
+    /// violated could lead to unsafety.
+    ///
+    /// Other use-cases of `assert!` include testing and enforcing run-time
+    /// invariants in safe code (whose violation cannot result in unsafety).
+    ///
+    /// # Custom Messages
+    ///
+    /// This macro has a second form, where a custom panic message can
+    /// be provided with or without arguments for formatting.  See [`std::fmt`]
+    /// for syntax for this form.
+    ///
+    /// [`panic!`]: macro.panic.html
+    /// [`debug_assert!`]: macro.debug_assert.html
+    /// [`std::fmt`]: ../std/fmt/index.html
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// // the panic message for these assertions is the stringified value of the
+    /// // expression given.
+    /// assert!(true);
+    ///
+    /// fn some_computation() -> bool { true } // a very simple function
+    ///
+    /// assert!(some_computation());
+    ///
+    /// // assert with a custom message
+    /// let x = true;
+    /// assert!(x, "x wasn't true!");
+    ///
+    /// let a = 3; let b = 27;
+    /// assert!(a + b == 30, "a = {}, b = {}", a, b);
+    /// ```
+    #[stable(feature = "rust1", since = "1.0.0")]
+    #[rustc_doc_only_macro]
+    macro_rules! assert {
+        ($cond:expr) => ({ /* compiler built-in */ });
+        ($cond:expr,) => ({ /* compiler built-in */ });
+        ($cond:expr, $($arg:tt)+) => ({ /* compiler built-in */ });
+    }
 }
 
-/// A macro for defining #[cfg] if-else statements.
+/// A macro for defining `#[cfg]` if-else statements.
 ///
 /// This is similar to the `if/elif` C preprocessor macro by allowing definition
 /// of a cascade of `#[cfg]` cases, emitting the implementation which matches
 /// first.
 ///
-/// This allows you to conveniently provide a long list #[cfg]'d blocks of code
+/// This allows you to conveniently provide a long list `#[cfg]`'d blocks of code
 /// without having to rewrite each clause multiple times.
 macro_rules! cfg_if {
     ($(

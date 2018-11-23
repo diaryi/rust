@@ -8,8 +8,11 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+#![allow(unused_must_use)]
+#![allow(unconditional_recursion)]
 // ignore-android: FIXME (#20004)
 // ignore-musl
+// ignore-cloudabi no processes
 // ignore-emscripten no processes
 
 #![feature(asm)]

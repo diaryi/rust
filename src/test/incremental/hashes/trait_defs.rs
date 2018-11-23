@@ -21,7 +21,7 @@
 // results in a change of the ICH for the trait's metadata, and that it stays
 // the same between rev2 and rev3.
 
-// must-compile-successfully
+// compile-pass
 // revisions: cfail1 cfail2 cfail3
 // compile-flags: -Z query-dep-graph -Zincremental-ignore-spans
 
@@ -270,7 +270,7 @@ trait TraitChangeModeSelfOwnToMut: Sized {
 #[rustc_clean(label="Hir", cfg="cfail2")]
 #[rustc_clean(label="Hir", cfg="cfail3")]
 trait TraitChangeModeSelfOwnToMut: Sized {
-    #[rustc_clean(label="Hir", cfg="cfail2")]
+    #[rustc_dirty(label="Hir", cfg="cfail2")]
     #[rustc_clean(label="Hir", cfg="cfail3")]
     #[rustc_dirty(label="HirBody", cfg="cfail2")]
     #[rustc_clean(label="HirBody", cfg="cfail3")]

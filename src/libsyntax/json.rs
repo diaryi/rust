@@ -19,14 +19,14 @@
 
 // FIXME spec the JSON output properly.
 
-use codemap::{CodeMap, FilePathMapping};
+use source_map::{SourceMap, FilePathMapping};
 use syntax_pos::{self, MacroBacktrace, Span, SpanLabel, MultiSpan};
 use errors::registry::Registry;
-use errors::{DiagnosticBuilder, SubDiagnostic, CodeSuggestion, CodeMapper};
-use errors::DiagnosticId;
+use errors::{DiagnosticBuilder, SubDiagnostic, CodeSuggestion, SourceMapper};
+use errors::{DiagnosticId, Applicability};
 use errors::emitter::{Emitter, EmitterWriter};
 
-use std::rc::Rc;
+use rustc_data_structures::sync::{self, Lrc};
 use std::io::{self, Write};
 use std::vec;
 use std::sync::{Arc, Mutex};
@@ -34,39 +34,47 @@ use std::sync::{Arc, Mutex};
 use rustc_serialize::json::{as_json, as_pretty_json};
 
 pub struct JsonEmitter {
-    dst: Box<Write + Send>,
+    dst: Box<dyn Write + Send>,
     registry: Option<Registry>,
-    cm: Rc<CodeMapper + 'static>,
+    sm: Lrc<dyn SourceMapper + sync::Send + sync::Sync>,
     pretty: bool,
+    ui_testing: bool,
 }
 
 impl JsonEmitter {
     pub fn stderr(registry: Option<Registry>,
-                  code_map: Rc<CodeMap>,
+                  source_map: Lrc<SourceMap>,
                   pretty: bool) -> JsonEmitter {
         JsonEmitter {
             dst: Box::new(io::stderr()),
             registry,
-            cm: code_map,
+            sm: source_map,
             pretty,
+            ui_testing: false,
         }
     }
 
     pub fn basic(pretty: bool) -> JsonEmitter {
         let file_path_mapping = FilePathMapping::empty();
-        JsonEmitter::stderr(None, Rc::new(CodeMap::new(file_path_mapping)), pretty)
+        JsonEmitter::stderr(None, Lrc::new(SourceMap::new(file_path_mapping)),
+                            pretty)
     }
 
-    pub fn new(dst: Box<Write + Send>,
+    pub fn new(dst: Box<dyn Write + Send>,
                registry: Option<Registry>,
-               code_map: Rc<CodeMap>,
+               source_map: Lrc<SourceMap>,
                pretty: bool) -> JsonEmitter {
         JsonEmitter {
             dst,
             registry,
-            cm: code_map,
+            sm: source_map,
             pretty,
+            ui_testing: false,
         }
+    }
+
+    pub fn ui_testing(self, ui_testing: bool) -> Self {
+        Self { ui_testing, ..self }
     }
 }
 
@@ -101,6 +109,7 @@ struct Diagnostic {
 }
 
 #[derive(RustcEncodable)]
+#[allow(unused_attributes)]
 struct DiagnosticSpan {
     file_name: String,
     byte_start: u32,
@@ -121,6 +130,8 @@ struct DiagnosticSpan {
     /// If we are suggesting a replacement, this will contain text
     /// that should be sliced in atop this span.
     suggested_replacement: Option<String>,
+    /// If the suggestion is approximate
+    suggestion_applicability: Option<Applicability>,
     /// Macro invocations that created the code at this span, if any.
     expansion: Option<Box<DiagnosticSpanMacroExpansion>>,
 }
@@ -188,7 +199,8 @@ impl Diagnostic {
         }
         let buf = BufWriter::default();
         let output = buf.clone();
-        EmitterWriter::new(Box::new(buf), Some(je.cm.clone()), false).emit(db);
+        EmitterWriter::new(Box::new(buf), Some(je.sm.clone()), false, false)
+            .ui_testing(je.ui_testing).emit(db);
         let output = Arc::try_unwrap(output.0).unwrap().into_inner().unwrap();
         let output = String::from_utf8(output).unwrap();
 
@@ -220,7 +232,7 @@ impl Diagnostic {
 
 impl DiagnosticSpan {
     fn from_span_label(span: SpanLabel,
-                       suggestion: Option<&String>,
+                       suggestion: Option<(&String, Applicability)>,
                        je: &JsonEmitter)
                        -> DiagnosticSpan {
         Self::from_span_etc(span.span,
@@ -233,7 +245,7 @@ impl DiagnosticSpan {
     fn from_span_etc(span: Span,
                      is_primary: bool,
                      label: Option<String>,
-                     suggestion: Option<&String>,
+                     suggestion: Option<(&String, Applicability)>,
                      je: &JsonEmitter)
                      -> DiagnosticSpan {
         // obtain the full backtrace from the `macro_backtrace`
@@ -253,12 +265,12 @@ impl DiagnosticSpan {
     fn from_span_full(span: Span,
                       is_primary: bool,
                       label: Option<String>,
-                      suggestion: Option<&String>,
+                      suggestion: Option<(&String, Applicability)>,
                       mut backtrace: vec::IntoIter<MacroBacktrace>,
                       je: &JsonEmitter)
                       -> DiagnosticSpan {
-        let start = je.cm.lookup_char_pos(span.lo());
-        let end = je.cm.lookup_char_pos(span.hi());
+        let start = je.sm.lookup_char_pos(span.lo());
+        let end = je.sm.lookup_char_pos(span.hi());
         let backtrace_step = backtrace.next().map(|bt| {
             let call_site =
                 Self::from_span_full(bt.call_site,
@@ -281,6 +293,7 @@ impl DiagnosticSpan {
                 def_site_span,
             })
         });
+
         DiagnosticSpan {
             file_name: start.file.name.to_string(),
             byte_start: span.lo().0 - start.file.start_pos.0,
@@ -291,7 +304,8 @@ impl DiagnosticSpan {
             column_end: end.col.0 + 1,
             is_primary,
             text: DiagnosticSpanLine::from_span(span, je),
-            suggested_replacement: suggestion.cloned(),
+            suggested_replacement: suggestion.map(|x| x.0.clone()),
+            suggestion_applicability: suggestion.map(|x| x.1),
             expansion: backtrace_step,
             label,
         }
@@ -309,14 +323,15 @@ impl DiagnosticSpan {
         suggestion.substitutions
                       .iter()
                       .flat_map(|substitution| {
-                          substitution.parts.iter().map(move |suggestion| {
+                          substitution.parts.iter().map(move |suggestion_inner| {
                               let span_label = SpanLabel {
-                                  span: suggestion.span,
+                                  span: suggestion_inner.span,
                                   is_primary: true,
                                   label: None,
                               };
                               DiagnosticSpan::from_span_label(span_label,
-                                                              Some(&suggestion.snippet),
+                                                              Some((&suggestion_inner.snippet,
+                                                                   suggestion.applicability)),
                                                               je)
                           })
                       })
@@ -325,7 +340,7 @@ impl DiagnosticSpan {
 }
 
 impl DiagnosticSpanLine {
-    fn line_from_filemap(fm: &syntax_pos::FileMap,
+    fn line_from_source_file(fm: &syntax_pos::SourceFile,
                          index: usize,
                          h_start: usize,
                          h_end: usize)
@@ -341,13 +356,13 @@ impl DiagnosticSpanLine {
     /// of `span` gets a DiagnosticSpanLine, with the highlight indicating the
     /// `span` within the line.
     fn from_span(span: Span, je: &JsonEmitter) -> Vec<DiagnosticSpanLine> {
-        je.cm.span_to_lines(span)
+        je.sm.span_to_lines(span)
              .map(|lines| {
                  let fm = &*lines.file;
                  lines.lines
                       .iter()
                       .map(|line| {
-                          DiagnosticSpanLine::line_from_filemap(fm,
+                          DiagnosticSpanLine::line_from_source_file(fm,
                                                                 line.line_index,
                                                                 line.start_col.0 + 1,
                                                                 line.end_col.0 + 1)

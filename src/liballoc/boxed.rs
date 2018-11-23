@@ -16,10 +16,18 @@
 //!
 //! # Examples
 //!
-//! Creating a box:
+//! Move a value from the stack to the heap by creating a [`Box`]:
 //!
 //! ```
-//! let x = Box::new(5);
+//! let val: u8 = 5;
+//! let boxed: Box<u8> = Box::new(val);
+//! ```
+//!
+//! Move a value from a [`Box`] back to the stack by [dereferencing]:
+//!
+//! ```
+//! let boxed: Box<u8> = Box::new(5);
+//! let val: u8 = *boxed;
 //! ```
 //!
 //! Creating a recursive data structure:
@@ -52,56 +60,30 @@
 //! elements are in the list, and so we don't know how much memory to allocate
 //! for a `Cons`. By introducing a `Box`, which has a defined size, we know how
 //! big `Cons` needs to be.
+//!
+//! [dereferencing]: ../../std/ops/trait.Deref.html
+//! [`Box`]: struct.Box.html
 
 #![stable(feature = "rust1", since = "1.0.0")]
-
-use heap::{Heap, Layout, Alloc};
-use raw_vec::RawVec;
 
 use core::any::Any;
 use core::borrow;
 use core::cmp::Ordering;
-use core::fmt;
-use core::hash::{self, Hash, Hasher};
-use core::iter::FusedIterator;
-use core::marker::{self, Unsize};
-use core::mem;
-use core::ops::{CoerceUnsized, Deref, DerefMut, Generator, GeneratorState};
-use core::ops::{BoxPlace, Boxed, InPlace, Place, Placer};
-use core::ptr::{self, Unique};
 use core::convert::From;
+use core::fmt;
+use core::future::Future;
+use core::hash::{Hash, Hasher};
+use core::iter::{Iterator, FromIterator, FusedIterator};
+use core::marker::{Unpin, Unsize};
+use core::mem;
+use core::pin::Pin;
+use core::ops::{CoerceUnsized, DispatchFromDyn, Deref, DerefMut, Generator, GeneratorState};
+use core::ptr::{self, NonNull, Unique};
+use core::task::{LocalWaker, Poll};
+
+use vec::Vec;
+use raw_vec::RawVec;
 use str::from_boxed_utf8_unchecked;
-
-/// A value that represents the heap. This is the default place that the `box`
-/// keyword allocates into when no place is supplied.
-///
-/// The following two examples are equivalent:
-///
-/// ```
-/// #![feature(box_heap)]
-///
-/// #![feature(box_syntax, placement_in_syntax)]
-/// use std::boxed::HEAP;
-///
-/// fn main() {
-///     let foo: Box<i32> = in HEAP { 5 };
-///     let foo = box 5;
-/// }
-/// ```
-#[unstable(feature = "box_heap",
-           reason = "may be renamed; uncertain about custom allocator design",
-           issue = "27779")]
-pub const HEAP: ExchangeHeapSingleton = ExchangeHeapSingleton { _force_singleton: () };
-
-/// This the singleton type used solely for `boxed::HEAP`.
-#[unstable(feature = "box_heap",
-           reason = "may be renamed; uncertain about custom allocator design",
-           issue = "27779")]
-#[allow(missing_debug_implementations)]
-#[derive(Copy, Clone)]
-pub struct ExchangeHeapSingleton {
-    _force_singleton: (),
-}
 
 /// A pointer type for heap allocation.
 ///
@@ -110,121 +92,6 @@ pub struct ExchangeHeapSingleton {
 #[fundamental]
 #[stable(feature = "rust1", since = "1.0.0")]
 pub struct Box<T: ?Sized>(Unique<T>);
-
-/// `IntermediateBox` represents uninitialized backing storage for `Box`.
-///
-/// FIXME (pnkfelix): Ideally we would just reuse `Box<T>` instead of
-/// introducing a separate `IntermediateBox<T>`; but then you hit
-/// issues when you e.g. attempt to destructure an instance of `Box`,
-/// since it is a lang item and so it gets special handling by the
-/// compiler.  Easier just to make this parallel type for now.
-///
-/// FIXME (pnkfelix): Currently the `box` protocol only supports
-/// creating instances of sized types. This IntermediateBox is
-/// designed to be forward-compatible with a future protocol that
-/// supports creating instances of unsized types; that is why the type
-/// parameter has the `?Sized` generalization marker, and is also why
-/// this carries an explicit size. However, it probably does not need
-/// to carry the explicit alignment; that is just a work-around for
-/// the fact that the `align_of` intrinsic currently requires the
-/// input type to be Sized (which I do not think is strictly
-/// necessary).
-#[unstable(feature = "placement_in",
-           reason = "placement box design is still being worked out.",
-           issue = "27779")]
-#[allow(missing_debug_implementations)]
-pub struct IntermediateBox<T: ?Sized> {
-    ptr: *mut u8,
-    layout: Layout,
-    marker: marker::PhantomData<*mut T>,
-}
-
-#[unstable(feature = "placement_in",
-           reason = "placement box design is still being worked out.",
-           issue = "27779")]
-impl<T> Place<T> for IntermediateBox<T> {
-    fn pointer(&mut self) -> *mut T {
-        self.ptr as *mut T
-    }
-}
-
-unsafe fn finalize<T>(b: IntermediateBox<T>) -> Box<T> {
-    let p = b.ptr as *mut T;
-    mem::forget(b);
-    Box::from_raw(p)
-}
-
-fn make_place<T>() -> IntermediateBox<T> {
-    let layout = Layout::new::<T>();
-
-    let p = if layout.size() == 0 {
-        mem::align_of::<T>() as *mut u8
-    } else {
-        unsafe {
-            Heap.alloc(layout.clone()).unwrap_or_else(|err| {
-                Heap.oom(err)
-            })
-        }
-    };
-
-    IntermediateBox {
-        ptr: p,
-        layout,
-        marker: marker::PhantomData,
-    }
-}
-
-#[unstable(feature = "placement_in",
-           reason = "placement box design is still being worked out.",
-           issue = "27779")]
-impl<T> BoxPlace<T> for IntermediateBox<T> {
-    fn make_place() -> IntermediateBox<T> {
-        make_place()
-    }
-}
-
-#[unstable(feature = "placement_in",
-           reason = "placement box design is still being worked out.",
-           issue = "27779")]
-impl<T> InPlace<T> for IntermediateBox<T> {
-    type Owner = Box<T>;
-    unsafe fn finalize(self) -> Box<T> {
-        finalize(self)
-    }
-}
-
-#[unstable(feature = "placement_new_protocol", issue = "27779")]
-impl<T> Boxed for Box<T> {
-    type Data = T;
-    type Place = IntermediateBox<T>;
-    unsafe fn finalize(b: IntermediateBox<T>) -> Box<T> {
-        finalize(b)
-    }
-}
-
-#[unstable(feature = "placement_in",
-           reason = "placement box design is still being worked out.",
-           issue = "27779")]
-impl<T> Placer<T> for ExchangeHeapSingleton {
-    type Place = IntermediateBox<T>;
-
-    fn make_place(self) -> IntermediateBox<T> {
-        make_place()
-    }
-}
-
-#[unstable(feature = "placement_in",
-           reason = "placement box design is still being worked out.",
-           issue = "27779")]
-impl<T: ?Sized> Drop for IntermediateBox<T> {
-    fn drop(&mut self) {
-        if self.layout.size() > 0 {
-            unsafe {
-                Heap.dealloc(self.ptr, self.layout.clone())
-            }
-        }
-    }
-}
 
 impl<T> Box<T> {
     /// Allocates memory on the heap and then places `x` into it.
@@ -240,6 +107,12 @@ impl<T> Box<T> {
     #[inline(always)]
     pub fn new(x: T) -> Box<T> {
         box x
+    }
+
+    #[unstable(feature = "pin", issue = "49150")]
+    #[inline(always)]
+    pub fn pinned(x: T) -> Pin<Box<T>> {
+        (box x).into()
     }
 }
 
@@ -269,41 +142,12 @@ impl<T: ?Sized> Box<T> {
     #[stable(feature = "box_raw", since = "1.4.0")]
     #[inline]
     pub unsafe fn from_raw(raw: *mut T) -> Self {
-        Box::from_unique(Unique::new_unchecked(raw))
+        Box(Unique::new_unchecked(raw))
     }
 
-    /// Constructs a `Box` from a `Unique<T>` pointer.
+    /// Consumes the `Box`, returning a wrapped raw pointer.
     ///
-    /// After calling this function, the memory is owned by a `Box` and `T` can
-    /// then be destroyed and released upon drop.
-    ///
-    /// # Safety
-    ///
-    /// A `Unique<T>` can be safely created via [`Unique::new`] and thus doesn't
-    /// necessarily own the data pointed to nor is the data guaranteed to live
-    /// as long as the pointer.
-    ///
-    /// [`Unique::new`]: ../../core/ptr/struct.Unique.html#method.new
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// #![feature(unique)]
-    ///
-    /// fn main() {
-    ///     let x = Box::new(5);
-    ///     let ptr = Box::into_unique(x);
-    ///     let x = unsafe { Box::from_unique(ptr) };
-    /// }
-    /// ```
-    #[unstable(feature = "unique", reason = "needs an RFC to flesh out design",
-               issue = "27730")]
-    #[inline]
-    pub unsafe fn from_unique(u: Unique<T>) -> Self {
-        Box(u)
-    }
-
-    /// Consumes the `Box`, returning the wrapped raw pointer.
+    /// The pointer will be properly aligned and non-null.
     ///
     /// After calling this function, the caller is responsible for the
     /// memory previously managed by the `Box`. In particular, the
@@ -326,41 +170,44 @@ impl<T: ?Sized> Box<T> {
     #[stable(feature = "box_raw", since = "1.4.0")]
     #[inline]
     pub fn into_raw(b: Box<T>) -> *mut T {
-        Box::into_unique(b).as_ptr()
+        Box::into_raw_non_null(b).as_ptr()
     }
 
-    /// Consumes the `Box`, returning the wrapped pointer as `Unique<T>`.
+    /// Consumes the `Box`, returning the wrapped pointer as `NonNull<T>`.
     ///
     /// After calling this function, the caller is responsible for the
     /// memory previously managed by the `Box`. In particular, the
     /// caller should properly destroy `T` and release the memory. The
-    /// proper way to do so is to either convert the `Unique<T>` pointer:
-    ///
-    /// - Into a `Box` with the [`Box::from_unique`] function.
-    ///
-    /// - Into a raw pointer and back into a `Box` with the [`Box::from_raw`]
-    ///   function.
+    /// proper way to do so is to convert the `NonNull<T>` pointer
+    /// into a raw pointer and back into a `Box` with the [`Box::from_raw`]
+    /// function.
     ///
     /// Note: this is an associated function, which means that you have
-    /// to call it as `Box::into_unique(b)` instead of `b.into_unique()`. This
+    /// to call it as `Box::into_raw_non_null(b)`
+    /// instead of `b.into_raw_non_null()`. This
     /// is so that there is no conflict with a method on the inner type.
     ///
-    /// [`Box::from_unique`]: struct.Box.html#method.from_unique
     /// [`Box::from_raw`]: struct.Box.html#method.from_raw
     ///
     /// # Examples
     ///
     /// ```
-    /// #![feature(unique)]
+    /// #![feature(box_into_raw_non_null)]
     ///
     /// fn main() {
     ///     let x = Box::new(5);
-    ///     let ptr = Box::into_unique(x);
+    ///     let ptr = Box::into_raw_non_null(x);
     /// }
     /// ```
-    #[unstable(feature = "unique", reason = "needs an RFC to flesh out design",
-               issue = "27730")]
+    #[unstable(feature = "box_into_raw_non_null", issue = "47336")]
     #[inline]
+    pub fn into_raw_non_null(b: Box<T>) -> NonNull<T> {
+        Box::into_unique(b).into()
+    }
+
+    #[unstable(feature = "ptr_internals", issue = "0", reason = "use into_raw_non_null instead")]
+    #[inline]
+    #[doc(hidden)]
     pub fn into_unique(b: Box<T>) -> Unique<T> {
         let unique = b.0;
         mem::forget(b);
@@ -368,7 +215,9 @@ impl<T: ?Sized> Box<T> {
     }
 
     /// Consumes and leaks the `Box`, returning a mutable reference,
-    /// `&'a mut T`. Here, the lifetime `'a` may be chosen to be `'static`.
+    /// `&'a mut T`. Note that the type `T` must outlive the chosen lifetime
+    /// `'a`. If the type has only static references, or none at all, then this
+    /// may be chosen to be `'static`.
     ///
     /// This function is mainly useful for data that lives for the remainder of
     /// the program's life. Dropping the returned reference will cause a memory
@@ -388,8 +237,6 @@ impl<T: ?Sized> Box<T> {
     /// Simple usage:
     ///
     /// ```
-    /// #![feature(box_leak)]
-    ///
     /// fn main() {
     ///     let x = Box::new(41);
     ///     let static_ref: &'static mut usize = Box::leak(x);
@@ -401,8 +248,6 @@ impl<T: ?Sized> Box<T> {
     /// Unsized data:
     ///
     /// ```
-    /// #![feature(box_leak)]
-    ///
     /// fn main() {
     ///     let x = vec![1, 2, 3].into_boxed_slice();
     ///     let static_ref = Box::leak(x);
@@ -410,8 +255,7 @@ impl<T: ?Sized> Box<T> {
     ///     assert_eq!(*static_ref, [4, 2, 3]);
     /// }
     /// ```
-    #[unstable(feature = "box_leak", reason = "needs an FCP to stabilize",
-               issue = "46179")]
+    #[stable(feature = "box_leak", since = "1.26.0")]
     #[inline]
     pub fn leak<'a>(b: Box<T>) -> &'a mut T
     where
@@ -542,7 +386,7 @@ impl<T: ?Sized + Eq> Eq for Box<T> {}
 
 #[stable(feature = "rust1", since = "1.0.0")]
 impl<T: ?Sized + Hash> Hash for Box<T> {
-    fn hash<H: hash::Hasher>(&self, state: &mut H) {
+    fn hash<H: Hasher>(&self, state: &mut H) {
         (**self).hash(state);
     }
 }
@@ -600,6 +444,16 @@ impl<T> From<T> for Box<T> {
     }
 }
 
+#[unstable(feature = "pin", issue = "49150")]
+impl<T> From<Box<T>> for Pin<Box<T>> {
+    fn from(boxed: Box<T>) -> Self {
+        // It's not possible to move or replace the insides of a `Pin<Box<T>>`
+        // when `T: !Unpin`,  so it's safe to pin it directly without any
+        // additional requirements.
+        unsafe { Pin::new_unchecked(boxed) }
+    }
+}
+
 #[stable(feature = "box_from_slice", since = "1.17.0")]
 impl<'a, T: Copy> From<&'a [T]> for Box<[T]> {
     fn from(slice: &'a [T]) -> Box<[T]> {
@@ -611,6 +465,7 @@ impl<'a, T: Copy> From<&'a [T]> for Box<[T]> {
 
 #[stable(feature = "box_from_slice", since = "1.17.0")]
 impl<'a> From<&'a str> for Box<str> {
+    #[inline]
     fn from(s: &'a str) -> Box<str> {
         unsafe { from_boxed_utf8_unchecked(Box::from(s.as_bytes())) }
     }
@@ -618,12 +473,13 @@ impl<'a> From<&'a str> for Box<str> {
 
 #[stable(feature = "boxed_str_conv", since = "1.19.0")]
 impl From<Box<str>> for Box<[u8]> {
+    #[inline]
     fn from(s: Box<str>) -> Self {
         unsafe { Box::from_raw(Box::into_raw(s) as *mut [u8]) }
     }
 }
 
-impl Box<Any> {
+impl Box<dyn Any> {
     #[inline]
     #[stable(feature = "rust1", since = "1.0.0")]
     /// Attempt to downcast the box to a concrete type.
@@ -645,10 +501,10 @@ impl Box<Any> {
     ///     print_if_string(Box::new(0i8));
     /// }
     /// ```
-    pub fn downcast<T: Any>(self) -> Result<Box<T>, Box<Any>> {
+    pub fn downcast<T: Any>(self) -> Result<Box<T>, Box<dyn Any>> {
         if self.is::<T>() {
             unsafe {
-                let raw: *mut Any = Box::into_raw(self);
+                let raw: *mut dyn Any = Box::into_raw(self);
                 Ok(Box::from_raw(raw as *mut T))
             }
         } else {
@@ -657,7 +513,7 @@ impl Box<Any> {
     }
 }
 
-impl Box<Any + Send> {
+impl Box<dyn Any + Send> {
     #[inline]
     #[stable(feature = "rust1", since = "1.0.0")]
     /// Attempt to downcast the box to a concrete type.
@@ -679,10 +535,10 @@ impl Box<Any + Send> {
     ///     print_if_string(Box::new(0i8));
     /// }
     /// ```
-    pub fn downcast<T: Any>(self) -> Result<Box<T>, Box<Any + Send>> {
-        <Box<Any>>::downcast(self).map_err(|s| unsafe {
+    pub fn downcast<T: Any>(self) -> Result<Box<T>, Box<dyn Any + Send>> {
+        <Box<dyn Any>>::downcast(self).map_err(|s| unsafe {
             // reapply the Send marker
-            Box::from_raw(Box::into_raw(s) as *mut (Any + Send))
+            Box::from_raw(Box::into_raw(s) as *mut (dyn Any + Send))
         })
     }
 }
@@ -756,7 +612,7 @@ impl<I: ExactSizeIterator + ?Sized> ExactSizeIterator for Box<I> {
     }
 }
 
-#[unstable(feature = "fused", issue = "35602")]
+#[stable(feature = "fused", since = "1.26.0")]
 impl<I: FusedIterator + ?Sized> FusedIterator for Box<I> {}
 
 
@@ -820,7 +676,7 @@ impl<A, F> FnBox<A> for F
 
 #[unstable(feature = "fnbox",
            reason = "will be deprecated if and when `Box<FnOnce>` becomes usable", issue = "28796")]
-impl<'a, A, R> FnOnce<A> for Box<FnBox<A, Output = R> + 'a> {
+impl<'a, A, R> FnOnce<A> for Box<dyn FnBox<A, Output = R> + 'a> {
     type Output = R;
 
     extern "rust-call" fn call_once(self, args: A) -> R {
@@ -830,7 +686,7 @@ impl<'a, A, R> FnOnce<A> for Box<FnBox<A, Output = R> + 'a> {
 
 #[unstable(feature = "fnbox",
            reason = "will be deprecated if and when `Box<FnOnce>` becomes usable", issue = "28796")]
-impl<'a, A, R> FnOnce<A> for Box<FnBox<A, Output = R> + Send + 'a> {
+impl<'a, A, R> FnOnce<A> for Box<dyn FnBox<A, Output = R> + Send + 'a> {
     type Output = R;
 
     extern "rust-call" fn call_once(self, args: A) -> R {
@@ -840,6 +696,16 @@ impl<'a, A, R> FnOnce<A> for Box<FnBox<A, Output = R> + Send + 'a> {
 
 #[unstable(feature = "coerce_unsized", issue = "27732")]
 impl<T: ?Sized + Unsize<U>, U: ?Sized> CoerceUnsized<Box<U>> for Box<T> {}
+
+#[unstable(feature = "dispatch_from_dyn", issue = "0")]
+impl<T: ?Sized + Unsize<U>, U: ?Sized> DispatchFromDyn<Box<U>> for Box<T> {}
+
+#[stable(feature = "boxed_slice_from_iter", since = "1.32.0")]
+impl<A> FromIterator<A> for Box<[A]> {
+    fn from_iter<T: IntoIterator<Item = A>>(iter: T) -> Self {
+        iter.into_iter().collect::<Vec<_>>().into_boxed_slice()
+    }
+}
 
 #[stable(feature = "box_slice_clone", since = "1.3.0")]
 impl<T: Clone> Clone for Box<[T]> {
@@ -879,7 +745,7 @@ impl<T: Clone> Clone for Box<[T]> {
         impl<T> Drop for BoxBuilder<T> {
             fn drop(&mut self) {
                 let mut data = self.data.ptr();
-                let max = unsafe { data.offset(self.len as isize) };
+                let max = unsafe { data.add(self.len) };
 
                 while data != max {
                     unsafe {
@@ -920,13 +786,47 @@ impl<T: ?Sized> AsMut<T> for Box<T> {
     }
 }
 
+/* Nota bene
+ *
+ *  We could have chosen not to add this impl, and instead have written a
+ *  function of Pin<Box<T>> to Pin<T>. Such a function would not be sound,
+ *  because Box<T> implements Unpin even when T does not, as a result of
+ *  this impl.
+ *
+ *  We chose this API instead of the alternative for a few reasons:
+ *      - Logically, it is helpful to understand pinning in regard to the
+ *        memory region being pointed to. For this reason none of the
+ *        standard library pointer types support projecting through a pin
+ *        (Box<T> is the only pointer type in std for which this would be
+ *        safe.)
+ *      - It is in practice very useful to have Box<T> be unconditionally
+ *        Unpin because of trait objects, for which the structural auto
+ *        trait functionality does not apply (e.g. Box<dyn Foo> would
+ *        otherwise not be Unpin).
+ *
+ *  Another type with the same semantics as Box but only a conditional
+ *  implementation of `Unpin` (where `T: Unpin`) would be valid/safe, and
+ *  could have a method to project a Pin<T> from it.
+ */
+#[unstable(feature = "pin", issue = "49150")]
+impl<T: ?Sized> Unpin for Box<T> { }
+
 #[unstable(feature = "generator_trait", issue = "43122")]
 impl<T> Generator for Box<T>
     where T: Generator + ?Sized
 {
     type Yield = T::Yield;
     type Return = T::Return;
-    fn resume(&mut self) -> GeneratorState<Self::Yield, Self::Return> {
+    unsafe fn resume(&mut self) -> GeneratorState<Self::Yield, Self::Return> {
         (**self).resume()
+    }
+}
+
+#[unstable(feature = "futures_api", issue = "50547")]
+impl<F: ?Sized + Future + Unpin> Future for Box<F> {
+    type Output = F::Output;
+
+    fn poll(mut self: Pin<&mut Self>, lw: &LocalWaker) -> Poll<Self::Output> {
+        F::poll(Pin::new(&mut *self), lw)
     }
 }

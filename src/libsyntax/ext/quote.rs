@@ -9,14 +9,15 @@
 // except according to those terms.
 
 use ast::{self, Arg, Arm, Block, Expr, Item, Pat, Stmt, Ty};
-use syntax_pos::Span;
+use source_map::respan;
+use syntax_pos::{Span, DUMMY_SP};
 use ext::base::ExtCtxt;
 use ext::base;
 use ext::build::AstBuilder;
 use parse::parser::{Parser, PathStyle};
 use parse::token;
 use ptr::P;
-use tokenstream::{TokenStream, TokenTree};
+use tokenstream::{DelimSpan, TokenStream, TokenTree};
 
 /// Quasiquoting works via token trees.
 ///
@@ -27,18 +28,19 @@ use tokenstream::{TokenStream, TokenTree};
 
 pub mod rt {
     use ast;
-    use codemap::Spanned;
+    use source_map::Spanned;
     use ext::base::ExtCtxt;
     use parse::{self, classify};
     use parse::token::{self, Token};
     use ptr::P;
     use symbol::Symbol;
+    use ThinVec;
 
-    use tokenstream::{self, TokenTree, TokenStream};
+    use tokenstream::{self, DelimSpan, TokenTree, TokenStream};
 
     pub use parse::new_parser_from_tts;
     pub use syntax_pos::{BytePos, Span, DUMMY_SP, FileName};
-    pub use codemap::{dummy_spanned};
+    pub use source_map::{dummy_spanned};
 
     pub trait ToTokens {
         fn to_tokens(&self, _cx: &ExtCtxt) -> Vec<TokenTree>;
@@ -74,7 +76,7 @@ pub mod rt {
 
     impl ToTokens for ast::Ident {
         fn to_tokens(&self, _cx: &ExtCtxt) -> Vec<TokenTree> {
-            vec![TokenTree::Token(DUMMY_SP, token::Ident(*self))]
+            vec![TokenTree::Token(self.span, Token::from_ast_ident(*self))]
         }
     }
 
@@ -190,6 +192,12 @@ pub mod rt {
         }
     }
 
+    impl ToTokens for ast::Lifetime {
+        fn to_tokens(&self, _cx: &ExtCtxt) -> Vec<TokenTree> {
+            vec![TokenTree::Token(self.ident.span, token::Lifetime(self.ident))]
+        }
+    }
+
     macro_rules! impl_to_tokens_slice {
         ($t: ty, $sep: expr) => {
             impl ToTokens for [$t] {
@@ -231,11 +239,14 @@ pub mod rt {
                 if i > 0 {
                     inner.push(TokenTree::Token(self.span, token::Colon).into());
                 }
-                inner.push(TokenTree::Token(self.span, token::Ident(segment.identifier)).into());
+                inner.push(TokenTree::Token(
+                    self.span, token::Token::from_ast_ident(segment.ident)
+                ).into());
             }
             inner.push(self.tokens.clone());
 
-            r.push(TokenTree::Delimited(self.span, tokenstream::Delimited {
+            let delim_span = DelimSpan::from_single(self.span);
+            r.push(TokenTree::Delimited(delim_span, tokenstream::Delimited {
                 delim: token::Bracket, tts: TokenStream::concat(inner).into()
             }));
             r
@@ -251,7 +262,7 @@ pub mod rt {
 
     impl ToTokens for () {
         fn to_tokens(&self, _cx: &ExtCtxt) -> Vec<TokenTree> {
-            vec![TokenTree::Delimited(DUMMY_SP, tokenstream::Delimited {
+            vec![TokenTree::Delimited(DelimSpan::dummy(), tokenstream::Delimited {
                 delim: token::Paren,
                 tts: TokenStream::empty().into(),
             })]
@@ -263,9 +274,9 @@ pub mod rt {
             // FIXME: This is wrong
             P(ast::Expr {
                 id: ast::DUMMY_NODE_ID,
-                node: ast::ExprKind::Lit(P(self.clone())),
+                node: ast::ExprKind::Lit(self.clone()),
                 span: DUMMY_SP,
-                attrs: ast::ThinVec::new(),
+                attrs: ThinVec::new(),
             }).to_tokens(cx)
         }
     }
@@ -294,9 +305,9 @@ pub mod rt {
                     let lit = ast::LitKind::Int(val as u128, ast::LitIntType::Signed($tag));
                     let lit = P(ast::Expr {
                         id: ast::DUMMY_NODE_ID,
-                        node: ast::ExprKind::Lit(P(dummy_spanned(lit))),
+                        node: ast::ExprKind::Lit(dummy_spanned(lit)),
                         span: DUMMY_SP,
-                        attrs: ast::ThinVec::new(),
+                        attrs: ThinVec::new(),
                     });
                     if *self >= 0 {
                         return lit.to_tokens(cx);
@@ -305,7 +316,7 @@ pub mod rt {
                         id: ast::DUMMY_NODE_ID,
                         node: ast::ExprKind::Unary(ast::UnOp::Neg, lit),
                         span: DUMMY_SP,
-                        attrs: ast::ThinVec::new(),
+                        attrs: ThinVec::new(),
                     }).to_tokens(cx)
                 }
             }
@@ -320,13 +331,13 @@ pub mod rt {
         );
     }
 
-    impl_to_tokens_int! { signed, isize, ast::IntTy::Is }
+    impl_to_tokens_int! { signed, isize, ast::IntTy::Isize }
     impl_to_tokens_int! { signed, i8,  ast::IntTy::I8 }
     impl_to_tokens_int! { signed, i16, ast::IntTy::I16 }
     impl_to_tokens_int! { signed, i32, ast::IntTy::I32 }
     impl_to_tokens_int! { signed, i64, ast::IntTy::I64 }
 
-    impl_to_tokens_int! { unsigned, usize, ast::UintTy::Us }
+    impl_to_tokens_int! { unsigned, usize, ast::UintTy::Usize }
     impl_to_tokens_int! { unsigned, u8,   ast::UintTy::U8 }
     impl_to_tokens_int! { unsigned, u16,  ast::UintTy::U16 }
     impl_to_tokens_int! { unsigned, u32,  ast::UintTy::U32 }
@@ -375,13 +386,16 @@ pub fn unflatten(tts: Vec<TokenTree>) -> Vec<TokenTree> {
 
     let mut results = Vec::new();
     let mut result = Vec::new();
+    let mut open_span = DUMMY_SP;
     for tree in tts {
         match tree {
-            TokenTree::Token(_, token::OpenDelim(..)) => {
+            TokenTree::Token(span, token::OpenDelim(..)) => {
+                open_span = span;
                 results.push(::std::mem::replace(&mut result, Vec::new()));
             }
             TokenTree::Token(span, token::CloseDelim(delim)) => {
-                let tree = TokenTree::Delimited(span, Delimited {
+                let delim_span = DelimSpan::from_pair(open_span, span);
+                let tree = TokenTree::Delimited(delim_span, Delimited {
                     delim,
                     tts: result.into_iter().map(TokenStream::from).collect::<TokenStream>().into(),
                 });
@@ -405,7 +419,7 @@ pub fn parse_item_panic(parser: &mut Parser) -> Option<P<Item>> {
 }
 
 pub fn parse_pat_panic(parser: &mut Parser) -> P<Pat> {
-    panictry!(parser.parse_pat())
+    panictry!(parser.parse_pat(None))
 }
 
 pub fn parse_arm_panic(parser: &mut Parser) -> Arm {
@@ -443,7 +457,7 @@ pub fn parse_path_panic(parser: &mut Parser, mode: PathStyle) -> ast::Path {
 pub fn expand_quote_tokens<'cx>(cx: &'cx mut ExtCtxt,
                                 sp: Span,
                                 tts: &[TokenTree])
-                                -> Box<base::MacResult+'cx> {
+                                -> Box<dyn base::MacResult+'cx> {
     let (cx_expr, expr) = expand_tts(cx, sp, tts);
     let expanded = expand_wrapper(cx, sp, cx_expr, expr, &[&["syntax", "ext", "quote", "rt"]]);
     base::MacEager::expr(expanded)
@@ -452,7 +466,7 @@ pub fn expand_quote_tokens<'cx>(cx: &'cx mut ExtCtxt,
 pub fn expand_quote_expr<'cx>(cx: &'cx mut ExtCtxt,
                               sp: Span,
                               tts: &[TokenTree])
-                              -> Box<base::MacResult+'cx> {
+                              -> Box<dyn base::MacResult+'cx> {
     let expanded = expand_parse_call(cx, sp, "parse_expr_panic", vec![], tts);
     base::MacEager::expr(expanded)
 }
@@ -460,7 +474,7 @@ pub fn expand_quote_expr<'cx>(cx: &'cx mut ExtCtxt,
 pub fn expand_quote_item<'cx>(cx: &'cx mut ExtCtxt,
                               sp: Span,
                               tts: &[TokenTree])
-                              -> Box<base::MacResult+'cx> {
+                              -> Box<dyn base::MacResult+'cx> {
     let expanded = expand_parse_call(cx, sp, "parse_item_panic", vec![], tts);
     base::MacEager::expr(expanded)
 }
@@ -468,7 +482,7 @@ pub fn expand_quote_item<'cx>(cx: &'cx mut ExtCtxt,
 pub fn expand_quote_pat<'cx>(cx: &'cx mut ExtCtxt,
                              sp: Span,
                              tts: &[TokenTree])
-                             -> Box<base::MacResult+'cx> {
+                             -> Box<dyn base::MacResult+'cx> {
     let expanded = expand_parse_call(cx, sp, "parse_pat_panic", vec![], tts);
     base::MacEager::expr(expanded)
 }
@@ -476,7 +490,7 @@ pub fn expand_quote_pat<'cx>(cx: &'cx mut ExtCtxt,
 pub fn expand_quote_arm(cx: &mut ExtCtxt,
                         sp: Span,
                         tts: &[TokenTree])
-                        -> Box<base::MacResult+'static> {
+                        -> Box<dyn base::MacResult+'static> {
     let expanded = expand_parse_call(cx, sp, "parse_arm_panic", vec![], tts);
     base::MacEager::expr(expanded)
 }
@@ -484,7 +498,7 @@ pub fn expand_quote_arm(cx: &mut ExtCtxt,
 pub fn expand_quote_ty(cx: &mut ExtCtxt,
                        sp: Span,
                        tts: &[TokenTree])
-                       -> Box<base::MacResult+'static> {
+                       -> Box<dyn base::MacResult+'static> {
     let expanded = expand_parse_call(cx, sp, "parse_ty_panic", vec![], tts);
     base::MacEager::expr(expanded)
 }
@@ -492,7 +506,7 @@ pub fn expand_quote_ty(cx: &mut ExtCtxt,
 pub fn expand_quote_stmt(cx: &mut ExtCtxt,
                          sp: Span,
                          tts: &[TokenTree])
-                         -> Box<base::MacResult+'static> {
+                         -> Box<dyn base::MacResult+'static> {
     let expanded = expand_parse_call(cx, sp, "parse_stmt_panic", vec![], tts);
     base::MacEager::expr(expanded)
 }
@@ -500,7 +514,7 @@ pub fn expand_quote_stmt(cx: &mut ExtCtxt,
 pub fn expand_quote_attr(cx: &mut ExtCtxt,
                          sp: Span,
                          tts: &[TokenTree])
-                         -> Box<base::MacResult+'static> {
+                         -> Box<dyn base::MacResult+'static> {
     let expanded = expand_parse_call(cx, sp, "parse_attribute_panic",
                                     vec![cx.expr_bool(sp, true)], tts);
 
@@ -510,7 +524,7 @@ pub fn expand_quote_attr(cx: &mut ExtCtxt,
 pub fn expand_quote_arg(cx: &mut ExtCtxt,
                         sp: Span,
                         tts: &[TokenTree])
-                        -> Box<base::MacResult+'static> {
+                        -> Box<dyn base::MacResult+'static> {
     let expanded = expand_parse_call(cx, sp, "parse_arg_panic", vec![], tts);
     base::MacEager::expr(expanded)
 }
@@ -518,7 +532,7 @@ pub fn expand_quote_arg(cx: &mut ExtCtxt,
 pub fn expand_quote_block(cx: &mut ExtCtxt,
                         sp: Span,
                         tts: &[TokenTree])
-                        -> Box<base::MacResult+'static> {
+                        -> Box<dyn base::MacResult+'static> {
     let expanded = expand_parse_call(cx, sp, "parse_block_panic", vec![], tts);
     base::MacEager::expr(expanded)
 }
@@ -526,7 +540,7 @@ pub fn expand_quote_block(cx: &mut ExtCtxt,
 pub fn expand_quote_meta_item(cx: &mut ExtCtxt,
                         sp: Span,
                         tts: &[TokenTree])
-                        -> Box<base::MacResult+'static> {
+                        -> Box<dyn base::MacResult+'static> {
     let expanded = expand_parse_call(cx, sp, "parse_meta_item_panic", vec![], tts);
     base::MacEager::expr(expanded)
 }
@@ -534,7 +548,7 @@ pub fn expand_quote_meta_item(cx: &mut ExtCtxt,
 pub fn expand_quote_path(cx: &mut ExtCtxt,
                         sp: Span,
                         tts: &[TokenTree])
-                        -> Box<base::MacResult+'static> {
+                        -> Box<dyn base::MacResult+'static> {
     let mode = mk_parser_path(cx, sp, &["PathStyle", "Type"]);
     let expanded = expand_parse_call(cx, sp, "parse_path_panic", vec![mode], tts);
     base::MacEager::expr(expanded)
@@ -614,7 +628,7 @@ fn expr_mk_token(cx: &ExtCtxt, sp: Span, tok: &token::Token) -> P<ast::Expr> {
         ($name: expr, $suffix: expr, $content: expr $(, $count: expr)*) => {{
             let name = mk_name(cx, sp, ast::Ident::with_empty_ctxt($content));
             let inner = cx.expr_call(sp, mk_token_path(cx, sp, $name), vec![
-                name $(, cx.expr_usize(sp, $count))*
+                name $(, cx.expr_u16(sp, $count))*
             ]);
             let suffix = match $suffix {
                 Some(name) => cx.expr_some(sp, mk_name(cx, sp, ast::Ident::with_empty_ctxt(name))),
@@ -651,10 +665,10 @@ fn expr_mk_token(cx: &ExtCtxt, sp: Span, tok: &token::Token) -> P<ast::Expr> {
         token::Literal(token::ByteStr(i), suf) => return mk_lit!("ByteStr", suf, i),
         token::Literal(token::ByteStrRaw(i, n), suf) => return mk_lit!("ByteStrRaw", suf, i, n),
 
-        token::Ident(ident) => {
+        token::Ident(ident, is_raw) => {
             return cx.expr_call(sp,
                                 mk_token_path(cx, sp, "Ident"),
-                                vec![mk_ident(cx, sp, ident)]);
+                                vec![mk_ident(cx, sp, ident), cx.expr_bool(sp, is_raw)]);
         }
 
         token::Lifetime(ident) => {
@@ -669,7 +683,11 @@ fn expr_mk_token(cx: &ExtCtxt, sp: Span, tok: &token::Token) -> P<ast::Expr> {
                                 vec![mk_name(cx, sp, ast::Ident::with_empty_ctxt(ident))]);
         }
 
-        token::Interpolated(_) => panic!("quote! with interpolated token"),
+        token::Interpolated(_) => {
+            cx.span_err(sp, "quote! with interpolated token");
+            // Use dummy name.
+            "Interpolated"
+        }
 
         token::Eq           => "Eq",
         token::Lt           => "Lt",
@@ -698,7 +716,7 @@ fn expr_mk_token(cx: &ExtCtxt, sp: Span, tok: &token::Token) -> P<ast::Expr> {
         token::Pound        => "Pound",
         token::Dollar       => "Dollar",
         token::Question     => "Question",
-        token::Underscore   => "Underscore",
+        token::SingleQuote  => "SingleQuote",
         token::Eof          => "Eof",
 
         token::Whitespace | token::Comment | token::Shebang(_) => {
@@ -710,7 +728,7 @@ fn expr_mk_token(cx: &ExtCtxt, sp: Span, tok: &token::Token) -> P<ast::Expr> {
 
 fn statements_mk_tt(cx: &ExtCtxt, tt: &TokenTree, quoted: bool) -> Vec<ast::Stmt> {
     match *tt {
-        TokenTree::Token(sp, token::Ident(ident)) if quoted => {
+        TokenTree::Token(sp, token::Ident(ident, _)) if quoted => {
             // tt.extend($ident.to_tokens(ext_cx))
 
             let e_to_toks =
@@ -742,9 +760,9 @@ fn statements_mk_tt(cx: &ExtCtxt, tt: &TokenTree, quoted: bool) -> Vec<ast::Stmt
             vec![cx.stmt_expr(e_push)]
         },
         TokenTree::Delimited(span, ref delimed) => {
-            let mut stmts = statements_mk_tt(cx, &delimed.open_tt(span), false);
+            let mut stmts = statements_mk_tt(cx, &delimed.open_tt(span.open), false);
             stmts.extend(statements_mk_tts(cx, delimed.stream()));
-            stmts.extend(statements_mk_tt(cx, &delimed.close_tt(span), false));
+            stmts.extend(statements_mk_tt(cx, &delimed.close_tt(span.close), false));
             stmts
         }
     }
@@ -788,7 +806,7 @@ fn mk_stmts_let(cx: &ExtCtxt, sp: Span) -> Vec<ast::Stmt> {
     // they happen to have a compiler on hand). Over all, the phase distinction
     // just makes quotes "hard to attribute". Possibly this could be fixed
     // by recreating some of the original qq machinery in the tt regime
-    // (pushing fake FileMaps onto the parser to account for original sites
+    // (pushing fake SourceFiles onto the parser to account for original sites
     // of quotes, for example) but at this point it seems not likely to be
     // worth the hassle.
 
@@ -845,7 +863,12 @@ fn expand_wrapper(cx: &ExtCtxt,
     let mut stmts = imports.iter().map(|path| {
         // make item: `use ...;`
         let path = path.iter().map(|s| s.to_string()).collect();
-        cx.stmt_item(sp, cx.item_use_glob(sp, ast::Visibility::Inherited, ids_ext(path)))
+        let use_item = cx.item_use_glob(
+            sp,
+            respan(sp.shrink_to_lo(), ast::VisibilityKind::Inherited),
+            ids_ext(path),
+        );
+        cx.stmt_item(sp, use_item)
     }).chain(Some(stmt_let_ext_cx)).collect::<Vec<_>>();
     stmts.push(cx.stmt_expr(expr));
 

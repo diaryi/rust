@@ -8,6 +8,8 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+// run-pass
+
 #![feature(generators, generator_trait)]
 
 use std::ops::{GeneratorState, Generator};
@@ -16,7 +18,7 @@ fn finish<T>(mut amt: usize, mut t: T) -> T::Return
     where T: Generator<Yield = ()>
 {
     loop {
-        match t.resume() {
+        match unsafe { t.resume() } {
             GeneratorState::Yielded(()) => amt = amt.checked_sub(1).unwrap(),
             GeneratorState::Complete(ret) => {
                 assert_eq!(amt, 0);

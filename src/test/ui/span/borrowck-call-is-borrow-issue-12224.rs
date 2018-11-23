@@ -42,7 +42,7 @@ fn test3<F>(f: &mut F) where F: FnMut() {
 
 fn test4(f: &Test) {
     f.f.call_mut(())
-    //~^ ERROR: cannot borrow immutable `Box` content `*f.f` as mutable
+    //~^ ERROR: cannot borrow `Box` content `*f.f` of immutable binding as mutable
 }
 
 fn test5(f: &mut Test) {
@@ -58,7 +58,10 @@ fn test6() {
 
 fn test7() {
     fn foo<F>(_: F) where F: FnMut(Box<FnMut(isize)>, isize) {}
-    let mut f = |g: Box<FnMut(isize)>, b: isize| {};
+    let s = String::new();  // Capture to make f !Copy
+    let mut f = move |g: Box<FnMut(isize)>, b: isize| {
+        let _ = s.len();
+    };
     f(Box::new(|a| {
         foo(f);
         //~^ ERROR cannot move `f` into closure because it is borrowed

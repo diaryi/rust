@@ -14,33 +14,41 @@ Rust MIR: a lowered representation of Rust. Also: an experiment!
 
 */
 
-#![deny(warnings)]
-
+#![feature(nll)]
+#![feature(in_band_lifetimes)]
+#![feature(slice_patterns)]
+#![feature(slice_sort_by_cached_key)]
 #![feature(box_patterns)]
 #![feature(box_syntax)]
-#![feature(catch_expr)]
-#![feature(conservative_impl_trait)]
-#![feature(const_fn)]
+#![feature(crate_visibility_modifier)]
 #![feature(core_intrinsics)]
+#![feature(const_fn)]
 #![feature(decl_macro)]
-#![feature(dyn_trait)]
-#![feature(i128_type)]
-#![feature(inclusive_range_syntax)]
-#![feature(inclusive_range)]
-#![feature(macro_vis_matcher)]
-#![feature(match_default_bindings)]
-#![feature(never_type)]
+#![feature(exhaustive_patterns)]
 #![feature(range_contains)]
 #![feature(rustc_diagnostic_macros)]
-#![feature(placement_in_syntax)]
-#![feature(collection_placement)]
-#![feature(nonzero)]
-#![feature(underscore_lifetimes)]
+#![feature(rustc_attrs)]
+#![feature(never_type)]
+#![feature(specialization)]
+#![feature(try_trait)]
+#![feature(unicode_internals)]
+#![feature(step_trait)]
+#![feature(slice_concat_ext)]
+#![feature(if_while_or_patterns)]
+#![feature(try_from)]
+#![feature(reverse_bits)]
+#![feature(underscore_imports)]
+
+#![recursion_limit="256"]
+
+extern crate arena;
 
 #[macro_use]
 extern crate bitflags;
 #[macro_use] extern crate log;
+extern crate either;
 extern crate graphviz as dot;
+extern crate polonius_engine;
 #[macro_use]
 extern crate rustc;
 #[macro_use] extern crate rustc_data_structures;
@@ -49,14 +57,20 @@ extern crate rustc_errors;
 #[macro_use]
 extern crate syntax;
 extern crate syntax_pos;
-extern crate rustc_back;
-extern crate rustc_const_math;
-extern crate rustc_const_eval;
-extern crate core; // for NonZero
+extern crate rustc_target;
 extern crate log_settings;
 extern crate rustc_apfloat;
 extern crate byteorder;
-extern crate rustc_trans_utils;
+extern crate core;
+extern crate smallvec;
+
+// Once we can use edition 2018 in the compiler,
+// replace this with real try blocks.
+macro_rules! try_block {
+    ($($inside:tt)*) => (
+        (||{ ::std::ops::Try::from_ok({ $($inside)* }) })()
+    )
+}
 
 mod diagnostics;
 
@@ -64,19 +78,25 @@ mod borrow_check;
 mod build;
 mod dataflow;
 mod hair;
+mod lints;
 mod shim;
 pub mod transform;
 pub mod util;
 pub mod interpret;
 pub mod monomorphize;
+pub mod const_eval;
 
-use rustc::ty::maps::Providers;
+pub use hair::pattern::check_crate as matchck_crate;
+use rustc::ty::query::Providers;
 
 pub fn provide(providers: &mut Providers) {
     borrow_check::provide(providers);
     shim::provide(providers);
     transform::provide(providers);
-    providers.const_eval = interpret::const_eval_provider;
+    monomorphize::partitioning::provide(providers);
+    providers.const_eval = const_eval::const_eval_provider;
+    providers.const_eval_raw = const_eval::const_eval_raw_provider;
+    providers.check_match = hair::pattern::check_match;
 }
 
 __build_diagnostic_array! { librustc_mir, DIAGNOSTICS }

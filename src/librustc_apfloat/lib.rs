@@ -10,7 +10,8 @@
 
 //! Port of LLVM's APFloat software floating-point implementation from the
 //! following C++ sources (please update commit hash when backporting):
-//! https://github.com/llvm-mirror/llvm/tree/23efab2bbd424ed13495a420ad8641cb2c6c28f9
+//! <https://github.com/llvm-mirror/llvm/tree/23efab2bbd424ed13495a420ad8641cb2c6c28f9>
+//!
 //! * `include/llvm/ADT/APFloat.h` -> `Float` and `FloatConvert` traits
 //! * `lib/Support/APFloat.cpp` -> `ieee` and `ppc` modules
 //! * `unittests/ADT/APFloatTest.cpp` -> `tests` directory
@@ -42,19 +43,17 @@
 #![doc(html_logo_url = "https://www.rust-lang.org/logos/rust-logo-128x128-blk-v2.png",
       html_favicon_url = "https://doc.rust-lang.org/favicon.ico",
       html_root_url = "https://doc.rust-lang.org/nightly/")]
-#![deny(warnings)]
 #![forbid(unsafe_code)]
 
-#![feature(i128_type)]
-#![feature(slice_patterns)]
+#![feature(nll)]
 #![feature(try_from)]
-
 // See librustc_cratesio_shim/Cargo.toml for a comment explaining this.
 #[allow(unused_extern_crates)]
 extern crate rustc_cratesio_shim;
 
 #[macro_use]
 extern crate bitflags;
+extern crate smallvec;
 
 use std::cmp::Ordering;
 use std::fmt;
@@ -221,8 +220,8 @@ pub struct ParseError(pub &'static str);
 ///
 /// `apfloat` does not provide any exception handling beyond default exception
 /// handling. We represent Signaling NaNs via IEEE-754R 2008 6.2.1 should clause
-/// by encoding Signaling NaNs with the first bit of its trailing significand as
-/// 0.
+/// by encoding Signaling NaNs with the first bit of its trailing significand
+/// as 0.
 ///
 /// Future work
 /// ===========
@@ -259,11 +258,11 @@ pub trait Float
     /// Number of bits in the significand. This includes the integer bit.
     const PRECISION: usize;
 
-    /// The largest E such that 2^E is representable; this matches the
+    /// The largest E such that 2<sup>E</sup> is representable; this matches the
     /// definition of IEEE 754.
     const MAX_EXP: ExpInt;
 
-    /// The smallest E such that 2^E is a normalized number; this
+    /// The smallest E such that 2<sup>E</sup> is a normalized number; this
     /// matches the definition of IEEE 754.
     const MIN_EXP: ExpInt;
 
@@ -571,7 +570,7 @@ pub trait Float
     ///
     fn ilogb(self) -> ExpInt;
 
-    /// Returns: self * 2^exp for integral exponents.
+    /// Returns: self * 2<sup>exp</sup> for integral exponents.
     fn scalbn_r(self, exp: ExpInt, round: Round) -> Self;
     fn scalbn(self, exp: ExpInt) -> Self {
         self.scalbn_r(exp, Round::NearestTiesToEven)

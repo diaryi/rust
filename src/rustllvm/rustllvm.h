@@ -22,8 +22,6 @@
 #include "llvm/ExecutionEngine/MCJIT.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/InlineAsm.h"
-#include "llvm/IR/InlineAsm.h"
-#include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
 #include "llvm/Support/CommandLine.h"
@@ -59,19 +57,15 @@
 
 #include "llvm/IR/LegacyPassManager.h"
 
-#if LLVM_VERSION_GE(4, 0)
 #include "llvm/Bitcode/BitcodeReader.h"
 #include "llvm/Bitcode/BitcodeWriter.h"
-#else
-#include "llvm/Bitcode/ReaderWriter.h"
-#endif
 
 #include "llvm/IR/DIBuilder.h"
 #include "llvm/IR/DebugInfo.h"
 #include "llvm/IR/IRPrintingPasses.h"
 #include "llvm/Linker/Linker.h"
 
-void LLVMRustSetLastError(const char *);
+extern "C" void LLVMRustSetLastError(const char *);
 
 enum class LLVMRustResult { Success, Failure };
 
@@ -99,13 +93,12 @@ enum LLVMRustAttribute {
   SanitizeThread = 20,
   SanitizeAddress = 21,
   SanitizeMemory = 22,
+  NonLazyBind = 23,
 };
 
 typedef struct OpaqueRustString *RustStringRef;
 typedef struct LLVMOpaqueTwine *LLVMTwineRef;
-typedef struct LLVMOpaqueDebugLoc *LLVMDebugLocRef;
 typedef struct LLVMOpaqueSMDiagnostic *LLVMSMDiagnosticRef;
-typedef struct LLVMOpaqueRustJITMemoryManager *LLVMRustJITMemoryManagerRef;
 
 extern "C" void LLVMRustStringWriteImpl(RustStringRef Str, const char *Ptr,
                                         size_t Size);

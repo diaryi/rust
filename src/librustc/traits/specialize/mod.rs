@@ -8,27 +8,29 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-// Logic and data structures related to impl specialization, explained in
-// greater detail below.
-//
-// At the moment, this implementation support only the simple "chain" rule:
-// If any two impls overlap, one must be a strict subset of the other.
-//
-// See traits/README.md for a bit more detail on how specialization
-// fits together with the rest of the trait machinery.
+//! Logic and data structures related to impl specialization, explained in
+//! greater detail below.
+//!
+//! At the moment, this implementation support only the simple "chain" rule:
+//! If any two impls overlap, one must be a strict subset of the other.
+//!
+//! See the [rustc guide] for a bit more detail on how specialization
+//! fits together with the rest of the trait machinery.
+//!
+//! [rustc guide]: https://rust-lang-nursery.github.io/rustc-guide/traits/specialization.html
 
 use super::{SelectionContext, FulfillmentContext};
 use super::util::impl_trait_ref_and_oblig;
 
-use rustc_data_structures::fx::{FxHashMap, FxHashSet};
+use rustc_data_structures::fx::FxHashSet;
 use hir::def_id::DefId;
 use infer::{InferCtxt, InferOk};
 use ty::subst::{Subst, Substs};
-use traits::{self, Reveal, ObligationCause};
+use traits::{self, ObligationCause, TraitEngine};
 use traits::select::IntercrateAmbiguityCause;
 use ty::{self, TyCtxt, TypeFoldable};
 use syntax_pos::DUMMY_SP;
-use std::rc::Rc;
+use rustc_data_structures::sync::Lrc;
 
 use lint;
 
@@ -88,7 +90,7 @@ pub fn translate_substs<'a, 'gcx, 'tcx>(infcx: &InferCtxt<'a, 'gcx, 'tcx>,
                                 .unwrap()
                                 .subst(infcx.tcx, &source_substs);
 
-    // translate the Self and TyParam parts of the substitution, since those
+    // translate the Self and Param parts of the substitution, since those
     // vary across impls
     let target_substs = match target_node {
         specialization_graph::Node::Impl(target_impl) => {
@@ -98,10 +100,10 @@ pub fn translate_substs<'a, 'gcx, 'tcx>(infcx: &InferCtxt<'a, 'gcx, 'tcx>,
             }
 
             fulfill_implication(infcx, param_env, source_trait_ref, target_impl)
-                .unwrap_or_else(|_| {
+                .unwrap_or_else(|_|
                     bug!("When translating substitutions for specialization, the expected \
                           specialization failed to hold")
-                })
+                )
         }
         specialization_graph::Node::Trait(..) => source_trait_ref.substs,
     };
@@ -127,25 +129,23 @@ pub fn find_associated_item<'a, 'tcx>(
     let trait_def = tcx.trait_def(trait_def_id);
 
     let ancestors = trait_def.ancestors(tcx, impl_data.impl_def_id);
-    match ancestors.defs(tcx, item.name, item.kind, trait_def_id).next() {
+    match ancestors.defs(tcx, item.ident, item.kind, trait_def_id).next() {
         Some(node_item) => {
             let substs = tcx.infer_ctxt().enter(|infcx| {
-                let param_env = ty::ParamEnv::empty(Reveal::All);
+                let param_env = ty::ParamEnv::reveal_all();
                 let substs = substs.rebase_onto(tcx, trait_def_id, impl_data.substs);
                 let substs = translate_substs(&infcx, param_env, impl_data.impl_def_id,
                                               substs, node_item.node);
                 let substs = infcx.tcx.erase_regions(&substs);
-                tcx.lift(&substs).unwrap_or_else(|| {
+                tcx.lift(&substs).unwrap_or_else(||
                     bug!("find_method: translate_substs \
                           returned {:?} which contains inference types/regions",
-                         substs);
-                })
+                         substs)
+                )
             });
             (node_item.item.def_id, substs)
         }
-        None => {
-            bug!("{:?} not found in {:?}", item, impl_data.impl_def_id)
-        }
+        None => bug!("{:?} not found in {:?}", item, impl_data.impl_def_id)
     }
 }
 
@@ -162,7 +162,7 @@ pub(super) fn specializes<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
 
     // The feature gate should prevent introducing new specializations, but not
     // taking advantage of upstream ones.
-    if !tcx.sess.features.borrow().specialization &&
+    if !tcx.features().specialization &&
         (impl1_def_id.is_local() || impl2_def_id.is_local()) {
         return false;
     }
@@ -184,7 +184,7 @@ pub(super) fn specializes<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
         return false;
     }
 
-    // create a parameter environment corresponding to a (skolemized) instantiation of impl1
+    // create a parameter environment corresponding to a (placeholder) instantiation of impl1
     let penv = tcx.param_env(impl1_def_id);
     let impl1_trait_ref = tcx.impl_trait_ref(impl1_def_id).unwrap();
 
@@ -194,6 +194,7 @@ pub(super) fn specializes<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
         // that this always succeeds.
         let impl1_trait_ref =
             match traits::fully_normalize(&infcx,
+                                          FulfillmentContext::new(),
                                           ObligationCause::dummy(),
                                           penv,
                                           &impl1_trait_ref) {
@@ -283,34 +284,13 @@ fn fulfill_implication<'a, 'gcx, 'tcx>(infcx: &InferCtxt<'a, 'gcx, 'tcx>,
     })
 }
 
-pub struct SpecializesCache {
-    map: FxHashMap<(DefId, DefId), bool>,
-}
-
-impl SpecializesCache {
-    pub fn new() -> Self {
-        SpecializesCache {
-            map: FxHashMap()
-        }
-    }
-
-    pub fn check(&self, a: DefId, b: DefId) -> Option<bool> {
-        self.map.get(&(a, b)).cloned()
-    }
-
-    pub fn insert(&mut self, a: DefId, b: DefId, result: bool) {
-        self.map.insert((a, b), result);
-    }
-}
-
 // Query provider for `specialization_graph_of`.
 pub(super) fn specialization_graph_provider<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
                                                       trait_id: DefId)
-                                                      -> Rc<specialization_graph::Graph> {
+                                                      -> Lrc<specialization_graph::Graph> {
     let mut sg = specialization_graph::Graph::new();
 
-    let mut trait_impls = Vec::new();
-    tcx.for_each_impl(trait_id, |impl_did| trait_impls.push(impl_did));
+    let mut trait_impls = tcx.all_impls(trait_id);
 
     // The coherence checking implementation seems to rely on impls being
     // iterated over (roughly) in definition order, so we are sorting by
@@ -341,7 +321,7 @@ pub(super) fn specialization_graph_provider<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx
                         }),
                     if used_to_be_allowed { " (E0119)" } else { "" }
                 );
-                let impl_span = tcx.sess.codemap().def_span(
+                let impl_span = tcx.sess.source_map().def_span(
                     tcx.span_of_impl(impl_def_id).unwrap()
                 );
                 let mut err = if used_to_be_allowed {
@@ -360,13 +340,13 @@ pub(super) fn specialization_graph_provider<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx
 
                 match tcx.span_of_impl(overlap.with_impl) {
                     Ok(span) => {
-                        err.span_label(tcx.sess.codemap().def_span(span),
-                                       format!("first implementation here"));
+                        err.span_label(tcx.sess.source_map().def_span(span),
+                                       "first implementation here".to_string());
                         err.span_label(impl_span,
                                        format!("conflicting implementation{}",
-                                                overlap.self_desc
-                                                    .map_or(String::new(),
-                                                            |ty| format!(" for `{}`", ty))));
+                                               overlap.self_desc
+                                                      .map_or(String::new(),
+                                                          |ty| format!(" for `{}`", ty))));
                     }
                     Err(cname) => {
                         let msg = match to_pretty_impl_header(tcx, overlap.with_impl) {
@@ -390,12 +370,12 @@ pub(super) fn specialization_graph_provider<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx
         }
     }
 
-    Rc::new(sg)
+    Lrc::new(sg)
 }
 
 /// Recovers the "impl X for Y" signature from `impl_def_id` and returns it as a
 /// string.
-fn to_pretty_impl_header(tcx: TyCtxt, impl_def_id: DefId) -> Option<String> {
+fn to_pretty_impl_header(tcx: TyCtxt<'_, '_, '_>, impl_def_id: DefId) -> Option<String> {
     use std::fmt::Write;
 
     let trait_ref = if let Some(tr) = tcx.impl_trait_ref(impl_def_id) {
@@ -416,7 +396,10 @@ fn to_pretty_impl_header(tcx: TyCtxt, impl_def_id: DefId) -> Option<String> {
     if !substs.is_noop() {
         types_without_default_bounds.extend(substs.types());
         w.push('<');
-        w.push_str(&substs.iter().map(|k| k.to_string()).collect::<Vec<_>>().join(", "));
+        w.push_str(&substs.iter()
+            .map(|k| k.to_string())
+            .filter(|k| &k[..] != "'_")
+            .collect::<Vec<_>>().join(", "));
         w.push('>');
     }
 
@@ -424,9 +407,11 @@ fn to_pretty_impl_header(tcx: TyCtxt, impl_def_id: DefId) -> Option<String> {
 
     // The predicates will contain default bounds like `T: Sized`. We need to
     // remove these bounds, and add `T: ?Sized` to any untouched type parameters.
-    let predicates = tcx.predicates_of(impl_def_id).predicates;
-    let mut pretty_predicates = Vec::with_capacity(predicates.len());
-    for p in predicates {
+    let predicates = &tcx.predicates_of(impl_def_id).predicates;
+    let mut pretty_predicates = Vec::with_capacity(
+        predicates.len() + types_without_default_bounds.len());
+
+    for (p, _) in predicates {
         if let Some(poly_trait_ref) = p.to_opt_poly_trait_ref() {
             if Some(poly_trait_ref.def_id()) == sized_trait {
                 types_without_default_bounds.remove(poly_trait_ref.self_ty());
@@ -435,9 +420,11 @@ fn to_pretty_impl_header(tcx: TyCtxt, impl_def_id: DefId) -> Option<String> {
         }
         pretty_predicates.push(p.to_string());
     }
-    for ty in types_without_default_bounds {
-        pretty_predicates.push(format!("{}: ?Sized", ty));
-    }
+
+    pretty_predicates.extend(
+        types_without_default_bounds.iter().map(|ty| format!("{}: ?Sized", ty))
+    );
+
     if !pretty_predicates.is_empty() {
         write!(w, "\n  where {}", pretty_predicates.join(", ")).unwrap();
     }

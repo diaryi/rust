@@ -8,14 +8,14 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-// revisions: normal nll
-//[nll] compile-flags: -Znll -Zborrowck=mir
+// run-pass
 
-#![feature(conservative_impl_trait,
-           universal_impl_trait,
-           fn_traits,
+// revisions: normal nll
+//[nll] compile-flags:-Zborrowck=mir
+
+#![feature(fn_traits,
            step_trait,
-           unboxed_closures
+           unboxed_closures,
 )]
 
 //! Derived from: <https://raw.githubusercontent.com/quickfur/dcal/master/dcal.d>.
@@ -234,42 +234,6 @@ impl Weekday {
     }
 }
 
-/// Wrapper for zero-sized closures.
-// HACK(eddyb) Only needed because closures can't implement Copy.
-struct Fn0<F>(std::marker::PhantomData<F>);
-
-impl<F> Copy for Fn0<F> {}
-impl<F> Clone for Fn0<F> {
-    fn clone(&self) -> Self { *self }
-}
-
-impl<F: FnOnce<A>, A> FnOnce<A> for Fn0<F> {
-    type Output = F::Output;
-
-    extern "rust-call" fn call_once(self, args: A) -> Self::Output {
-        let f = unsafe { std::mem::uninitialized::<F>() };
-        f.call_once(args)
-    }
-}
-
-impl<F: FnMut<A>, A> FnMut<A> for Fn0<F> {
-    extern "rust-call" fn call_mut(&mut self, args: A) -> Self::Output {
-        let mut f = unsafe { std::mem::uninitialized::<F>() };
-        f.call_mut(args)
-    }
-}
-
-trait AsFn0<A>: Sized {
-    fn copyable(self) -> Fn0<Self>;
-}
-
-impl<F: FnMut<A>, A> AsFn0<A> for F {
-    fn copyable(self) -> Fn0<Self> {
-        assert_eq!(std::mem::size_of::<F>(), 0);
-        Fn0(std::marker::PhantomData)
-    }
-}
-
 /// GroupBy implementation.
 struct GroupBy<It: Iterator, F> {
     it: std::iter::Peekable<It>,
@@ -277,11 +241,15 @@ struct GroupBy<It: Iterator, F> {
 }
 
 impl<It, F> Clone for GroupBy<It, F>
-where It: Iterator + Clone, It::Item: Clone, F: Clone {
-    fn clone(&self) -> GroupBy<It, F> {
+where
+    It: Iterator + Clone,
+    It::Item: Clone,
+    F: Clone,
+{
+    fn clone(&self) -> Self {
         GroupBy {
             it: self.it.clone(),
-            f: self.f.clone()
+            f: self.f.clone(),
         }
     }
 }
@@ -331,24 +299,21 @@ impl<It: Iterator, F: FnMut(&It::Item) -> G, G: Eq> Iterator for InGroup<It, F, 
 }
 
 trait IteratorExt: Iterator + Sized {
-    fn group_by<G, F>(self, f: F) -> GroupBy<Self, Fn0<F>>
-    where F: FnMut(&Self::Item) -> G,
+    fn group_by<G, F>(self, f: F) -> GroupBy<Self, F>
+    where F: Clone + FnMut(&Self::Item) -> G,
           G: Eq
     {
-        GroupBy {
-            it: self.peekable(),
-            f: f.copyable(),
-        }
+        GroupBy { it: self.peekable(), f }
     }
 
     fn join(mut self, sep: &str) -> String
     where Self::Item: std::fmt::Display {
         let mut s = String::new();
         if let Some(e) = self.next() {
-            write!(s, "{}", e);
+            write!(s, "{}", e).unwrap();
             for e in self {
                 s.push_str(sep);
-                write!(s, "{}", e);
+                write!(s, "{}", e).unwrap();
             }
         }
         s
@@ -382,7 +347,7 @@ fn test_spaces() {
 fn dates_in_year(year: i32) -> impl Iterator<Item=NaiveDate>+Clone {
     InGroup {
         it: NaiveDate::from_ymd(year, 1, 1)..,
-        f: (|d: &NaiveDate| d.year()).copyable(),
+        f: |d: &NaiveDate| d.year(),
         g: year
     }
 }
@@ -572,7 +537,7 @@ fn format_weeks(it: impl Iterator<Item = impl DateIterator>) -> impl Iterator<It
                 first = false;
             }
 
-            write!(buf, " {:>2}", d.day());
+            write!(buf, " {:>2}", d.day()).unwrap();
         }
 
         // Insert more filler at the end to fill up the remainder of the week,

@@ -8,7 +8,9 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-#![feature(conservative_impl_trait, specialization)]
+// run-pass
+
+#![feature(specialization)]
 
 trait Foo: std::fmt::Debug + Eq {}
 

@@ -8,18 +8,18 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-use bitvec::BitMatrix;
+use bit_set::BitMatrix;
 use fx::FxHashMap;
+use sync::Lock;
 use rustc_serialize::{Encodable, Encoder, Decodable, Decoder};
 use stable_hasher::{HashStable, StableHasher, StableHasherResult};
-use std::cell::RefCell;
 use std::fmt::Debug;
 use std::hash::Hash;
 use std::mem;
 
 
 #[derive(Clone, Debug)]
-pub struct TransitiveRelation<T: Clone + Debug + Eq + Hash + Clone> {
+pub struct TransitiveRelation<T: Clone + Debug + Eq + Hash> {
     // List of elements. This is used to map from a T to a usize.
     elements: Vec<T>,
 
@@ -32,14 +32,26 @@ pub struct TransitiveRelation<T: Clone + Debug + Eq + Hash + Clone> {
 
     // This is a cached transitive closure derived from the edges.
     // Currently, we build it lazilly and just throw out any existing
-    // copy whenever a new edge is added. (The RefCell is to permit
+    // copy whenever a new edge is added. (The Lock is to permit
     // the lazy computation.) This is kind of silly, except for the
     // fact its size is tied to `self.elements.len()`, so I wanted to
     // wait before building it up to avoid reallocating as new edges
     // are added with new elements. Perhaps better would be to ask the
     // user for a batch of edges to minimize this effect, but I
     // already wrote the code this way. :P -nmatsakis
-    closure: RefCell<Option<BitMatrix>>,
+    closure: Lock<Option<BitMatrix<usize, usize>>>,
+}
+
+// HACK(eddyb) manual impl avoids `Default` bound on `T`.
+impl<T: Clone + Debug + Eq + Hash> Default for TransitiveRelation<T> {
+    fn default() -> Self {
+        TransitiveRelation {
+            elements: Default::default(),
+            map: Default::default(),
+            edges: Default::default(),
+            closure: Default::default(),
+        }
+    }
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, RustcEncodable, RustcDecodable, Debug)]
@@ -51,16 +63,7 @@ struct Edge {
     target: Index,
 }
 
-impl<T: Clone + Debug + Eq + Hash + Clone> TransitiveRelation<T> {
-    pub fn new() -> TransitiveRelation<T> {
-        TransitiveRelation {
-            elements: vec![],
-            map: FxHashMap(),
-            edges: vec![],
-            closure: RefCell::new(None),
-        }
-    }
-
+impl<T: Clone + Debug + Eq + Hash> TransitiveRelation<T> {
     pub fn is_empty(&self) -> bool {
         self.edges.is_empty()
     }
@@ -72,21 +75,20 @@ impl<T: Clone + Debug + Eq + Hash + Clone> TransitiveRelation<T> {
     fn add_index(&mut self, a: T) -> Index {
         let &mut TransitiveRelation {
             ref mut elements,
-            ref closure,
+            ref mut closure,
             ref mut map,
             ..
         } = self;
 
-        map.entry(a.clone())
+        *map.entry(a.clone())
            .or_insert_with(|| {
                elements.push(a);
 
                // if we changed the dimensions, clear the cache
-               *closure.borrow_mut() = None;
+               *closure.get_mut() = None;
 
                Index(elements.len() - 1)
            })
-           .clone()
     }
 
     /// Applies the (partial) function to each edge and returns a new
@@ -96,16 +98,9 @@ impl<T: Clone + Debug + Eq + Hash + Clone> TransitiveRelation<T> {
         where F: FnMut(&T) -> Option<U>,
               U: Clone + Debug + Eq + Hash + Clone,
     {
-        let mut result = TransitiveRelation::new();
+        let mut result = TransitiveRelation::default();
         for edge in &self.edges {
-            let r = f(&self.elements[edge.source.0]).and_then(|source| {
-                f(&self.elements[edge.target.0]).and_then(|target| {
-                    Some(result.add(source, target))
-                })
-            });
-            if r.is_none() {
-                return None;
-            }
+            result.add(f(&self.elements[edge.source.0])?, f(&self.elements[edge.target.0])?);
         }
         Some(result)
     }
@@ -122,7 +117,7 @@ impl<T: Clone + Debug + Eq + Hash + Clone> TransitiveRelation<T> {
             self.edges.push(edge);
 
             // added an edge, clear the cache
-            *self.closure.borrow_mut() = None;
+            *self.closure.get_mut() = None;
         }
     }
 
@@ -287,7 +282,7 @@ impl<T: Clone + Debug + Eq + Hash + Clone> TransitiveRelation<T> {
             //
             // This same algorithm is used in `parents` below.
 
-            let mut candidates = closure.intersection(a.0, b.0); // (1)
+            let mut candidates = closure.intersect_rows(a.0, b.0); // (1)
             pare_down(&mut candidates, closure); // (2)
             candidates.reverse(); // (3a)
             pare_down(&mut candidates, closure); // (3b)
@@ -329,7 +324,7 @@ impl<T: Clone + Debug + Eq + Hash + Clone> TransitiveRelation<T> {
         // with a slight tweak. In the case where `a R a`, we remove
         // that from the set of candidates.
         let ancestors = self.with_closure(|closure| {
-            let mut ancestors = closure.intersection(a.0, a.0);
+            let mut ancestors = closure.intersect_rows(a.0, a.0);
 
             // Remove anything that can reach `a`. If this is a
             // reflexive relation, this will include `a` itself.
@@ -354,7 +349,7 @@ impl<T: Clone + Debug + Eq + Hash + Clone> TransitiveRelation<T> {
     }
 
     fn with_closure<OP, R>(&self, op: OP) -> R
-        where OP: FnOnce(&BitMatrix) -> R
+        where OP: FnOnce(&BitMatrix<usize, usize>) -> R
     {
         let mut closure_cell = self.closure.borrow_mut();
         let mut closure = closure_cell.take();
@@ -366,18 +361,18 @@ impl<T: Clone + Debug + Eq + Hash + Clone> TransitiveRelation<T> {
         result
     }
 
-    fn compute_closure(&self) -> BitMatrix {
+    fn compute_closure(&self) -> BitMatrix<usize, usize> {
         let mut matrix = BitMatrix::new(self.elements.len(),
                                         self.elements.len());
         let mut changed = true;
         while changed {
             changed = false;
-            for edge in self.edges.iter() {
+            for edge in &self.edges {
                 // add an edge from S -> T
-                changed |= matrix.add(edge.source.0, edge.target.0);
+                changed |= matrix.insert(edge.source.0, edge.target.0);
 
                 // add all outgoing edges from T into S
-                changed |= matrix.merge(edge.target.0, edge.source.0);
+                changed |= matrix.union_rows(edge.target.0, edge.source.0);
             }
         }
         matrix
@@ -396,7 +391,7 @@ impl<T: Clone + Debug + Eq + Hash + Clone> TransitiveRelation<T> {
 /// - Input: `[a, b, x]`. Output: `[a, x]`.
 /// - Input: `[b, a, x]`. Output: `[b, a, x]`.
 /// - Input: `[a, x, b, y]`. Output: `[a, x]`.
-fn pare_down(candidates: &mut Vec<usize>, closure: &BitMatrix) {
+fn pare_down(candidates: &mut Vec<usize>, closure: &BitMatrix<usize, usize>) {
     let mut i = 0;
     while i < candidates.len() {
         let candidate_i = candidates[i];
@@ -443,7 +438,7 @@ impl<T> Decodable for TransitiveRelation<T>
                               .enumerate()
                               .map(|(index, elem)| (elem.clone(), Index(index)))
                               .collect();
-            Ok(TransitiveRelation { elements, edges, map, closure: RefCell::new(None) })
+            Ok(TransitiveRelation { elements, edges, map, closure: Lock::new(None) })
         })
     }
 }
@@ -495,7 +490,7 @@ impl<CTX> HashStable<CTX> for Index {
 
 #[test]
 fn test_one_step() {
-    let mut relation = TransitiveRelation::new();
+    let mut relation = TransitiveRelation::default();
     relation.add("a", "b");
     relation.add("a", "c");
     assert!(relation.contains(&"a", &"c"));
@@ -506,7 +501,7 @@ fn test_one_step() {
 
 #[test]
 fn test_many_steps() {
-    let mut relation = TransitiveRelation::new();
+    let mut relation = TransitiveRelation::default();
     relation.add("a", "b");
     relation.add("a", "c");
     relation.add("a", "f");
@@ -536,7 +531,7 @@ fn mubs_triangle() {
     //      ^
     //      |
     //      b
-    let mut relation = TransitiveRelation::new();
+    let mut relation = TransitiveRelation::default();
     relation.add("a", "tcx");
     relation.add("b", "tcx");
     assert_eq!(relation.minimal_upper_bounds(&"a", &"b"), vec![&"tcx"]);
@@ -557,7 +552,7 @@ fn mubs_best_choice1() {
     // need the second pare down call to get the right result (after
     // intersection, we have [1, 2], but 2 -> 1).
 
-    let mut relation = TransitiveRelation::new();
+    let mut relation = TransitiveRelation::default();
     relation.add("0", "1");
     relation.add("0", "2");
 
@@ -584,7 +579,7 @@ fn mubs_best_choice2() {
     // Like the precedecing test, but in this case intersection is [2,
     // 1], and hence we rely on the first pare down call.
 
-    let mut relation = TransitiveRelation::new();
+    let mut relation = TransitiveRelation::default();
     relation.add("0", "1");
     relation.add("0", "2");
 
@@ -603,7 +598,7 @@ fn mubs_best_choice2() {
 fn mubs_no_best_choice() {
     // in this case, the intersection yields [1, 2], and the "pare
     // down" calls find nothing to remove.
-    let mut relation = TransitiveRelation::new();
+    let mut relation = TransitiveRelation::default();
     relation.add("0", "1");
     relation.add("0", "2");
 
@@ -620,7 +615,7 @@ fn mubs_best_choice_scc() {
     // in this case, 1 and 2 form a cycle; we pick arbitrarily (but
     // consistently).
 
-    let mut relation = TransitiveRelation::new();
+    let mut relation = TransitiveRelation::default();
     relation.add("0", "1");
     relation.add("0", "2");
 
@@ -642,7 +637,7 @@ fn pdub_crisscross() {
     //   /\       |
     // b -> b1 ---+
 
-    let mut relation = TransitiveRelation::new();
+    let mut relation = TransitiveRelation::default();
     relation.add("a", "a1");
     relation.add("a", "b1");
     relation.add("b", "a1");
@@ -665,7 +660,7 @@ fn pdub_crisscross_more() {
     //   /\    /\             |
     // b -> b1 -> b2 ---------+
 
-    let mut relation = TransitiveRelation::new();
+    let mut relation = TransitiveRelation::default();
     relation.add("a", "a1");
     relation.add("a", "b1");
     relation.add("b", "a1");
@@ -698,7 +693,7 @@ fn pdub_lub() {
     //            |
     // b -> b1 ---+
 
-    let mut relation = TransitiveRelation::new();
+    let mut relation = TransitiveRelation::default();
     relation.add("a", "a1");
     relation.add("b", "b1");
     relation.add("a1", "x");
@@ -721,7 +716,7 @@ fn mubs_intermediate_node_on_one_side_only() {
     //           b
 
     // "digraph { a -> c -> d; b -> d; }",
-    let mut relation = TransitiveRelation::new();
+    let mut relation = TransitiveRelation::default();
     relation.add("a", "c");
     relation.add("c", "d");
     relation.add("b", "d");
@@ -740,7 +735,7 @@ fn mubs_scc_1() {
     //           b
 
     // "digraph { a -> c -> d; d -> c; a -> d; b -> d; }",
-    let mut relation = TransitiveRelation::new();
+    let mut relation = TransitiveRelation::default();
     relation.add("a", "c");
     relation.add("c", "d");
     relation.add("d", "c");
@@ -760,7 +755,7 @@ fn mubs_scc_2() {
     //      +--- b
 
     // "digraph { a -> c -> d; d -> c; b -> d; b -> c; }",
-    let mut relation = TransitiveRelation::new();
+    let mut relation = TransitiveRelation::default();
     relation.add("a", "c");
     relation.add("c", "d");
     relation.add("d", "c");
@@ -780,7 +775,7 @@ fn mubs_scc_3() {
     //           b ---+
 
     // "digraph { a -> c -> d -> e -> c; b -> d; b -> e; }",
-    let mut relation = TransitiveRelation::new();
+    let mut relation = TransitiveRelation::default();
     relation.add("a", "c");
     relation.add("c", "d");
     relation.add("d", "e");
@@ -802,7 +797,7 @@ fn mubs_scc_4() {
     //           b ---+
 
     // "digraph { a -> c -> d -> e -> c; a -> d; b -> e; }"
-    let mut relation = TransitiveRelation::new();
+    let mut relation = TransitiveRelation::default();
     relation.add("a", "c");
     relation.add("c", "d");
     relation.add("d", "e");
@@ -840,7 +835,7 @@ fn parent() {
         (1, /*->*/ 3),
     ];
 
-    let mut relation = TransitiveRelation::new();
+    let mut relation = TransitiveRelation::default();
     for (a, b) in pairs {
         relation.add(a, b);
     }

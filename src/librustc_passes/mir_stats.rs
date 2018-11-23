@@ -12,13 +12,13 @@
 // pieces of MIR. The resulting numbers are good approximations but not
 // completely accurate (some things might be counted twice, others missed).
 
-use rustc_const_math::{ConstUsize};
 use rustc::mir::{AggregateKind, AssertMessage, BasicBlock, BasicBlockData};
-use rustc::mir::{Constant, Literal, Location, Local, LocalDecl};
+use rustc::mir::{Constant, Location, Local, LocalDecl};
 use rustc::mir::{Place, PlaceElem, PlaceProjection};
 use rustc::mir::{Mir, Operand, ProjectionElem};
 use rustc::mir::{Rvalue, SourceInfo, Statement, StatementKind};
-use rustc::mir::{Terminator, TerminatorKind, VisibilityScope, VisibilityScopeData};
+use rustc::mir::{Terminator, TerminatorKind, SourceScope, SourceScopeData};
+use rustc::mir::interpret::EvalErrorKind;
 use rustc::mir::visit as mir_visit;
 use rustc::ty::{self, ClosureSubsts, TyCtxt};
 use rustc::util::nodemap::{FxHashMap};
@@ -65,17 +65,14 @@ impl<'a, 'tcx> mir_visit::Visitor<'tcx> for StatCollector<'a, 'tcx> {
         self.super_mir(mir);
     }
 
-    fn visit_basic_block_data(&mut self,
-                              block: BasicBlock,
-                              data: &BasicBlockData<'tcx>) {
+    fn visit_basic_block_data(&mut self, block: BasicBlock, data: &BasicBlockData<'tcx>) {
         self.record("BasicBlockData", data);
         self.super_basic_block_data(block, data);
     }
 
-    fn visit_visibility_scope_data(&mut self,
-                                   scope_data: &VisibilityScopeData) {
-        self.record("VisibilityScopeData", scope_data);
-        self.super_visibility_scope_data(scope_data);
+    fn visit_source_scope_data(&mut self, scope_data: &SourceScopeData) {
+        self.record("SourceScopeData", scope_data);
+        self.super_source_scope_data(scope_data);
     }
 
     fn visit_statement(&mut self,
@@ -85,12 +82,15 @@ impl<'a, 'tcx> mir_visit::Visitor<'tcx> for StatCollector<'a, 'tcx> {
         self.record("Statement", statement);
         self.record(match statement.kind {
             StatementKind::Assign(..) => "StatementKind::Assign",
+            StatementKind::FakeRead(..) => "StatementKind::FakeRead",
             StatementKind::EndRegion(..) => "StatementKind::EndRegion",
-            StatementKind::Validate(..) => "StatementKind::Validate",
+            StatementKind::Retag { .. } => "StatementKind::Retag",
+            StatementKind::EscapeToRaw { .. } => "StatementKind::EscapeToRaw",
             StatementKind::SetDiscriminant { .. } => "StatementKind::SetDiscriminant",
             StatementKind::StorageLive(..) => "StatementKind::StorageLive",
             StatementKind::StorageDead(..) => "StatementKind::StorageDead",
             StatementKind::InlineAsm { .. } => "StatementKind::InlineAsm",
+            StatementKind::AscribeUserType(..) => "StatementKind::AscribeUserType",
             StatementKind::Nop => "StatementKind::Nop",
         }, &statement.kind);
         self.super_statement(block, statement, location);
@@ -123,30 +123,31 @@ impl<'a, 'tcx> mir_visit::Visitor<'tcx> for StatCollector<'a, 'tcx> {
             TerminatorKind::GeneratorDrop => "TerminatorKind::GeneratorDrop",
             TerminatorKind::Yield { .. } => "TerminatorKind::Yield",
             TerminatorKind::FalseEdges { .. } => "TerminatorKind::FalseEdges",
+            TerminatorKind::FalseUnwind { .. } => "TerminatorKind::FalseUnwind",
         }, kind);
         self.super_terminator_kind(block, kind, location);
     }
 
-    fn visit_assert_message(&mut self,
-                            msg: &AssertMessage<'tcx>,
-                            location: Location) {
+    fn visit_assert_message(&mut self, msg: &AssertMessage<'tcx>, location: Location) {
         self.record("AssertMessage", msg);
         self.record(match *msg {
-            AssertMessage::BoundsCheck { .. } => "AssertMessage::BoundsCheck",
-            AssertMessage::Math(..) => "AssertMessage::Math",
-            AssertMessage::GeneratorResumedAfterReturn => {
+            EvalErrorKind::BoundsCheck { .. } => "AssertMessage::BoundsCheck",
+            EvalErrorKind::Overflow(..) => "AssertMessage::Overflow",
+            EvalErrorKind::OverflowNeg => "AssertMessage::OverflowNeg",
+            EvalErrorKind::DivisionByZero => "AssertMessage::DivisionByZero",
+            EvalErrorKind::RemainderByZero => "AssertMessage::RemainderByZero",
+            EvalErrorKind::GeneratorResumedAfterReturn => {
                 "AssertMessage::GeneratorResumedAfterReturn"
             }
-            AssertMessage::GeneratorResumedAfterPanic => {
+            EvalErrorKind::GeneratorResumedAfterPanic => {
                 "AssertMessage::GeneratorResumedAfterPanic"
             }
+            _ => bug!(),
         }, msg);
         self.super_assert_message(msg, location);
     }
 
-    fn visit_rvalue(&mut self,
-                    rvalue: &Rvalue<'tcx>,
-                    location: Location) {
+    fn visit_rvalue(&mut self, rvalue: &Rvalue<'tcx>, location: Location) {
         self.record("Rvalue", rvalue);
         let rvalue_kind = match *rvalue {
             Rvalue::Use(..) => "Rvalue::Use",
@@ -177,9 +178,7 @@ impl<'a, 'tcx> mir_visit::Visitor<'tcx> for StatCollector<'a, 'tcx> {
         self.super_rvalue(rvalue, location);
     }
 
-    fn visit_operand(&mut self,
-                     operand: &Operand<'tcx>,
-                     location: Location) {
+    fn visit_operand(&mut self, operand: &Operand<'tcx>, location: Location) {
         self.record("Operand", operand);
         self.record(match *operand {
             Operand::Copy(..) => "Operand::Copy",
@@ -197,6 +196,7 @@ impl<'a, 'tcx> mir_visit::Visitor<'tcx> for StatCollector<'a, 'tcx> {
         self.record(match *place {
             Place::Local(..) => "Place::Local",
             Place::Static(..) => "Place::Static",
+            Place::Promoted(..) => "Place::Promoted",
             Place::Projection(..) => "Place::Projection",
         }, place);
         self.super_place(place, context, location);
@@ -212,7 +212,6 @@ impl<'a, 'tcx> mir_visit::Visitor<'tcx> for StatCollector<'a, 'tcx> {
 
     fn visit_projection_elem(&mut self,
                              place: &PlaceElem<'tcx>,
-                             context: mir_visit::PlaceContext<'tcx>,
                              location: Location) {
         self.record("PlaceElem", place);
         self.record(match *place {
@@ -223,64 +222,36 @@ impl<'a, 'tcx> mir_visit::Visitor<'tcx> for StatCollector<'a, 'tcx> {
             ProjectionElem::ConstantIndex { .. } => "PlaceElem::ConstantIndex",
             ProjectionElem::Downcast(..) => "PlaceElem::Downcast",
         }, place);
-        self.super_projection_elem(place, context, location);
+        self.super_projection_elem(place, location);
     }
 
-    fn visit_constant(&mut self,
-                      constant: &Constant<'tcx>,
-                      location: Location) {
+    fn visit_constant(&mut self, constant: &Constant<'tcx>, location: Location) {
         self.record("Constant", constant);
         self.super_constant(constant, location);
     }
 
-    fn visit_literal(&mut self,
-                     literal: &Literal<'tcx>,
-                     location: Location) {
-        self.record("Literal", literal);
-        self.record(match *literal {
-            Literal::Value { .. } => "Literal::Value",
-            Literal::Promoted { .. } => "Literal::Promoted",
-        }, literal);
-        self.super_literal(literal, location);
-    }
-
-    fn visit_source_info(&mut self,
-                         source_info: &SourceInfo) {
+    fn visit_source_info(&mut self, source_info: &SourceInfo) {
         self.record("SourceInfo", source_info);
         self.super_source_info(source_info);
     }
 
-    fn visit_closure_substs(&mut self,
-                            substs: &ClosureSubsts<'tcx>,
-                            _: Location) {
+    fn visit_closure_substs(&mut self, substs: &ClosureSubsts<'tcx>, _: Location) {
         self.record("ClosureSubsts", substs);
         self.super_closure_substs(substs);
     }
 
-    fn visit_const(&mut self,
-                   constant: &&'tcx ty::Const<'tcx>,
-                   _: Location) {
+    fn visit_const(&mut self, constant: &&'tcx ty::Const<'tcx>, _: Location) {
         self.record("Const", constant);
         self.super_const(constant);
     }
 
-    fn visit_const_usize(&mut self,
-                         const_usize: &ConstUsize,
-                         _: Location) {
-        self.record("ConstUsize", const_usize);
-        self.super_const_usize(const_usize);
-    }
-
-    fn visit_local_decl(&mut self,
-                        local: Local,
-                        local_decl: &LocalDecl<'tcx>) {
+    fn visit_local_decl(&mut self, local: Local, local_decl: &LocalDecl<'tcx>) {
         self.record("LocalDecl", local_decl);
         self.super_local_decl(local, local_decl);
     }
 
-    fn visit_visibility_scope(&mut self,
-                              scope: &VisibilityScope) {
+    fn visit_source_scope(&mut self, scope: &SourceScope) {
         self.record("VisiblityScope", scope);
-        self.super_visibility_scope(scope);
+        self.super_source_scope(scope);
     }
 }
